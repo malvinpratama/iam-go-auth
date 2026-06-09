@@ -18,10 +18,10 @@ import (
 	"github.com/malvinpratama/iam-go-libs/db"
 	"github.com/malvinpratama/iam-go-auth/internal/email"
 	"github.com/malvinpratama/iam-go-libs/events"
-	"github.com/malvinpratama/iam-go-libs/interceptor"
 	"github.com/malvinpratama/iam-go-auth/internal/jwt"
 	"github.com/malvinpratama/iam-go-libs/logger"
 	"github.com/malvinpratama/iam-go-libs/migrate"
+	"github.com/malvinpratama/iam-go-libs/obs"
 	auth "github.com/malvinpratama/iam-go-auth"
 	authdb "github.com/malvinpratama/iam-go-auth/internal/db"
 	"github.com/malvinpratama/iam-go-auth/internal/handler"
@@ -37,6 +37,15 @@ func main() {
 		log.Error("insecure configuration", "err", err)
 		os.Exit(1)
 	}
+
+	// Tracing (optional) + Prometheus /metrics.
+	shutdownTracer, err := obs.InitTracer(ctx, "auth", config.OTLPEndpoint())
+	if err != nil {
+		log.Error("init tracer", "err", err)
+		os.Exit(1)
+	}
+	defer func() { _ = shutdownTracer(context.Background()) }()
+	obs.ServeMetrics(config.MetricsAddr(), log)
 
 	dbURL := config.MustEnv("AUTH_DATABASE_URL")
 	port := config.Getenv("AUTH_GRPC_PORT", "50051")
@@ -96,7 +105,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv := grpc.NewServer(interceptor.Chain(config.InternalToken()))
+	srv := grpc.NewServer(obs.ServerOptions(config.InternalToken(), log)...)
 	authv1.RegisterAuthServiceServer(srv, h)
 
 	hs := health.NewServer()
@@ -105,6 +114,7 @@ func main() {
 	if !config.IsProduction() {
 		reflection.Register(srv) // dev only — avoid schema disclosure in prod
 	}
+	obs.RegisterServerMetrics(srv) // per-method metrics at zero
 
 	go func() {
 		<-ctx.Done()
