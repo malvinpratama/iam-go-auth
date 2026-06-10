@@ -7,8 +7,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/malvinpratama/iam-go-auth/internal/password"
 	"github.com/malvinpratama/iam-go-auth/internal/db"
+	"github.com/malvinpratama/iam-go-auth/internal/password"
 )
 
 // BootstrapAdmin ensures an admin account exists. It is idempotent: if the email
