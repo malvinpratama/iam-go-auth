@@ -9,6 +9,18 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type ApiKey struct {
+	ID         string
+	UserID     uuid.UUID
+	KeyHash    string
+	Name       string
+	Scopes     []string
+	ExpiresAt  pgtype.Timestamptz
+	RevokedAt  pgtype.Timestamptz
+	LastUsedAt pgtype.Timestamptz
+	CreatedAt  pgtype.Timestamptz
+}
+
 type AuditEvent struct {
 	ID         int64
 	ActorID    string
@@ -25,6 +37,56 @@ type EmailVerification struct {
 	ExpiresAt  pgtype.Timestamptz
 	ConsumedAt pgtype.Timestamptz
 	CreatedAt  pgtype.Timestamptz
+}
+
+type OauthAuthorizationCode struct {
+	CodeHash            string
+	ClientID            string
+	UserID              uuid.UUID
+	RedirectUri         string
+	Scope               string
+	CodeChallenge       *string
+	CodeChallengeMethod *string
+	Nonce               *string
+	ExpiresAt           pgtype.Timestamptz
+	Used                bool
+	CreatedAt           pgtype.Timestamptz
+}
+
+type OauthClient struct {
+	ClientID         string
+	ClientSecretHash *string
+	Name             string
+	RedirectUris     []string
+	GrantTypes       []string
+	Scopes           []string
+	IsConfidential   bool
+	CreatedAt        pgtype.Timestamptz
+}
+
+type OauthConsent struct {
+	UserID    uuid.UUID
+	ClientID  string
+	Scopes    []string
+	GrantedAt pgtype.Timestamptz
+}
+
+type OidcSigningKey struct {
+	Kid        string
+	PrivatePem string
+	PublicPem  string
+	Alg        string
+	Active     bool
+	CreatedAt  pgtype.Timestamptz
+}
+
+type Outbox struct {
+	ID          uuid.UUID
+	AggregateID uuid.UUID
+	EventType   string
+	Payload     []byte
+	CreatedAt   pgtype.Timestamptz
+	PublishedAt pgtype.Timestamptz
 }
 
 type PasswordReset struct {
@@ -67,6 +129,14 @@ type RolePermission struct {
 	PermissionID int64
 }
 
+type TotpRecoveryCode struct {
+	ID        int64
+	UserID    uuid.UUID
+	CodeHash  string
+	UsedAt    pgtype.Timestamptz
+	CreatedAt pgtype.Timestamptz
+}
+
 type User struct {
 	ID                  uuid.UUID
 	Email               string
@@ -77,6 +147,9 @@ type User struct {
 	EmailVerified       bool
 	FailedLoginAttempts int32
 	LockedUntil         pgtype.Timestamptz
+	TotpSecret          *string
+	TotpEnabled         bool
+	DeletedAt           pgtype.Timestamptz
 }
 
 type UserRole struct {

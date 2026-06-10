@@ -4,17 +4,72 @@ VALUES ($1, $2)
 RETURNING id, email, status, created_at, updated_at;
 
 -- name: GetUserByEmail :one
-SELECT id, email, password_hash, status, email_verified, failed_login_attempts, locked_until, created_at, updated_at
+SELECT id, email, password_hash, status, email_verified, failed_login_attempts, locked_until, totp_secret, totp_enabled, deleted_at, created_at, updated_at
 FROM users
 WHERE email = $1;
 
 -- name: GetUserByID :one
-SELECT id, email, password_hash, status, email_verified, failed_login_attempts, locked_until, created_at, updated_at
+SELECT id, email, password_hash, status, email_verified, failed_login_attempts, locked_until, totp_secret, totp_enabled, deleted_at, created_at, updated_at
 FROM users
 WHERE id = $1;
 
 -- name: DeleteUser :exec
 DELETE FROM users WHERE id = $1;
+
+-- name: SoftDeleteUser :exec
+UPDATE users SET deleted_at = now(), updated_at = now() WHERE id = $1 AND deleted_at IS NULL;
+
+-- name: RestoreUser :exec
+UPDATE users SET deleted_at = NULL, updated_at = now() WHERE id = $1;
+
+-- name: IsUserActive :one
+SELECT (deleted_at IS NULL)::boolean FROM users WHERE id = $1;
+
+-- ── 2FA / TOTP (v0.9) ───────────────────────────────────────
+
+-- name: SetTotpSecret :exec
+UPDATE users SET totp_secret = $2, totp_enabled = false, updated_at = now() WHERE id = $1;
+
+-- name: EnableTotp :exec
+UPDATE users SET totp_enabled = true, updated_at = now() WHERE id = $1;
+
+-- name: DisableTotp :exec
+UPDATE users SET totp_secret = NULL, totp_enabled = false, updated_at = now() WHERE id = $1;
+
+-- name: InsertRecoveryCode :exec
+INSERT INTO totp_recovery_codes (user_id, code_hash) VALUES ($1, $2);
+
+-- name: DeleteRecoveryCodes :exec
+DELETE FROM totp_recovery_codes WHERE user_id = $1;
+
+-- name: ConsumeRecoveryCode :one
+UPDATE totp_recovery_codes SET used_at = now()
+WHERE user_id = $1 AND code_hash = $2 AND used_at IS NULL
+RETURNING id;
+
+-- ── API keys (v0.9) ─────────────────────────────────────────
+
+-- name: CreateApiKey :exec
+INSERT INTO api_keys (id, user_id, key_hash, name, scopes, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6);
+
+-- name: GetApiKeyByHash :one
+SELECT id, user_id, scopes, expires_at, revoked_at
+FROM api_keys
+WHERE key_hash = $1;
+
+-- name: ListApiKeysByUser :many
+SELECT id, name, scopes, expires_at, last_used_at, created_at
+FROM api_keys
+WHERE user_id = $1 AND revoked_at IS NULL
+ORDER BY created_at DESC;
+
+-- name: RevokeApiKey :exec
+UPDATE api_keys SET revoked_at = now()
+WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL;
+
+-- name: TouchApiKey :exec
+UPDATE api_keys SET last_used_at = now() WHERE id = $1;
 
 -- name: IncrementLoginFailure :one
 UPDATE users SET failed_login_attempts = failed_login_attempts + 1

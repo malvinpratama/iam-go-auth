@@ -152,10 +152,33 @@ func (h *AuthHandler) Login(ctx context.Context, req *authv1.LoginRequest) (*aut
 		return nil, status.Error(codes.Unauthenticated, "email not verified")
 	}
 
+	// Soft-deleted identities cannot log in (reported as invalid credentials so
+	// account existence isn't leaked).
+	if user.DeletedAt.Valid {
+		return nil, status.Error(codes.Unauthenticated, "invalid credentials")
+	}
+
 	_ = h.q.ResetLoginState(ctx, user.ID)
+
+	// 2FA: when TOTP is enabled the password step alone is not enough. Issue a
+	// short-lived MFA token; the client completes login via LoginTotp with a
+	// TOTP or recovery code.
+	if user.TotpEnabled {
+		h.auditAs(ctx, user.ID.String(), user.Email, "login.mfa_challenge", "", "")
+		mfaTok, err := h.jwt.IssueMFA(user.ID.String(), mfaTokenTTL)
+		if err != nil {
+			return nil, status.Error(codes.Internal, "failed to issue mfa token")
+		}
+		return &authv1.TokenPair{MfaRequired: true, MfaToken: mfaTok, TokenType: "Bearer"}, nil
+	}
+
 	h.auditAs(ctx, user.ID.String(), user.Email, "login.success", "", "")
 	return h.issueTokens(ctx, user.ID, user.Email)
 }
+
+// mfaTokenTTL bounds how long the password step stays valid while the user
+// fetches a TOTP code.
+const mfaTokenTTL = 5 * time.Minute
 
 // Refresh rotates a valid refresh token for a new token pair.
 func (h *AuthHandler) Refresh(ctx context.Context, req *authv1.RefreshRequest) (*authv1.TokenPair, error) {
@@ -209,6 +232,10 @@ func (h *AuthHandler) ValidateToken(ctx context.Context, req *authv1.ValidateTok
 	if err != nil {
 		return nil, status.Error(codes.Unauthenticated, "invalid or expired token")
 	}
+	// An MFA-purpose token only completes a 2FA login; it is not a bearer token.
+	if claims.Purpose != "" {
+		return nil, status.Error(codes.Unauthenticated, "invalid token")
+	}
 	if claims.ID != "" {
 		revoked, err := h.q.IsTokenRevoked(ctx, claims.ID)
 		if err != nil {
@@ -221,6 +248,11 @@ func (h *AuthHandler) ValidateToken(ctx context.Context, req *authv1.ValidateTok
 	userID, err := uuid.Parse(claims.Subject)
 	if err != nil {
 		return nil, status.Error(codes.Unauthenticated, "invalid subject")
+	}
+	// Reject tokens for a soft-deleted (or removed) identity.
+	active, err := h.q.IsUserActive(ctx, userID)
+	if err != nil || !active {
+		return nil, status.Error(codes.Unauthenticated, "account is not active")
 	}
 	roles, err := h.q.GetUserRoles(ctx, userID)
 	if err != nil {
@@ -256,10 +288,20 @@ func (h *AuthHandler) DeleteUser(ctx context.Context, req *authv1.DeleteUserRequ
 	}
 	defer tx.Rollback(ctx)
 	qtx := h.q.WithTx(tx)
-	if err := qtx.DeleteUser(ctx, userID); err != nil {
-		return nil, status.Error(codes.Internal, "failed to delete user")
+	// Hard delete removes the row entirely (FK cascade); the default soft delete
+	// just stamps deleted_at so the identity can be restored.
+	if req.GetHard() {
+		if err := qtx.DeleteUser(ctx, userID); err != nil {
+			return nil, status.Error(codes.Internal, "failed to delete user")
+		}
+	} else {
+		if err := qtx.SoftDeleteUser(ctx, userID); err != nil {
+			return nil, status.Error(codes.Internal, "failed to delete user")
+		}
+		// Revoke active sessions so a soft-deleted user is logged out everywhere.
+		_ = qtx.RevokeAllUserRefreshTokens(ctx, userID)
 	}
-	payload, err := json.Marshal(events.UserDeleted{UserID: userID.String()})
+	payload, err := json.Marshal(events.UserDeleted{UserID: userID.String(), Hard: req.GetHard()})
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to encode event")
 	}
@@ -271,7 +313,7 @@ func (h *AuthHandler) DeleteUser(ctx context.Context, req *authv1.DeleteUserRequ
 	if err := tx.Commit(ctx); err != nil {
 		return nil, status.Error(codes.Internal, "tx commit failed")
 	}
-	h.audit(ctx, "user.delete", req.GetUserId(), "")
+	h.audit(ctx, "user.delete", req.GetUserId(), map[bool]string{true: "hard", false: "soft"}[req.GetHard()])
 	return &authv1.DeleteUserResponse{Success: true}, nil
 }
 
