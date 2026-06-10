@@ -10,10 +10,12 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	authv1 "github.com/malvinpratama/iam-go-contracts/gen/auth/v1"
+	"github.com/malvinpratama/iam-go-libs/config"
 )
 
 // randCode returns a high-entropy URL-safe opaque token.
@@ -91,4 +93,87 @@ func (h *AuthHandler) SaveConsent(ctx context.Context, req *authv1.SaveConsentRe
 		return nil, status.Error(codes.Internal, "could not save consent")
 	}
 	return &authv1.SaveConsentResponse{Success: true}, nil
+}
+
+// ExchangeAuthorizationCode swaps a one-time code (with PKCE) for tokens.
+func (h *AuthHandler) ExchangeAuthorizationCode(ctx context.Context, req *authv1.ExchangeAuthorizationCodeRequest) (*authv1.OidcTokenResponse, error) {
+	sum := sha256.Sum256([]byte(req.GetCode()))
+	codeHash := hex.EncodeToString(sum[:])
+
+	var (
+		clientID, redirectURI, scope    string
+		userID                          uuid.UUID
+		challenge, method, nonce        pgtype.Text
+		used, expired                   bool
+	)
+	err := h.pool.QueryRow(ctx,
+		`SELECT client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, nonce, used, (expires_at < now())
+		   FROM oauth_authorization_codes WHERE code_hash = $1`, codeHash).
+		Scan(&clientID, &userID, &redirectURI, &scope, &challenge, &method, &nonce, &used, &expired)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid_grant")
+	}
+	if used || expired || clientID != req.GetClientId() || redirectURI != req.GetRedirectUri() {
+		return nil, status.Error(codes.InvalidArgument, "invalid_grant")
+	}
+	// Single-use: burn the code immediately.
+	_, _ = h.pool.Exec(ctx, `UPDATE oauth_authorization_codes SET used = true WHERE code_hash = $1`, codeHash)
+
+	hasPKCE := challenge.Valid && challenge.String != ""
+	if hasPKCE && !verifyPKCE(challenge.String, method.String, req.GetCodeVerifier()) {
+		return nil, status.Error(codes.InvalidArgument, "invalid_grant")
+	}
+
+	// Client authentication.
+	var secretHash pgtype.Text
+	var isConfidential bool
+	if err := h.pool.QueryRow(ctx,
+		`SELECT client_secret_hash, is_confidential FROM oauth_clients WHERE client_id = $1`, clientID).
+		Scan(&secretHash, &isConfidential); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid_client")
+	}
+	if isConfidential {
+		sh := sha256.Sum256([]byte(req.GetClientSecret()))
+		if !secretHash.Valid || hex.EncodeToString(sh[:]) != secretHash.String {
+			return nil, status.Error(codes.Unauthenticated, "invalid_client")
+		}
+	} else if !hasPKCE {
+		return nil, status.Error(codes.InvalidArgument, "PKCE required for public clients")
+	}
+
+	var email string
+	if err := h.pool.QueryRow(ctx, `SELECT email FROM users WHERE id = $1`, userID).Scan(&email); err != nil {
+		return nil, status.Error(codes.Internal, "user lookup failed")
+	}
+
+	tp, err := h.issueTokens(ctx, userID, email)
+	if err != nil {
+		return nil, err
+	}
+	issuer := config.Getenv("OIDC_ISSUER", "http://localhost:8080")
+	idToken, err := h.jwt.IssueIDToken(userID.String(), email, clientID, nonce.String, issuer)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "failed to sign id_token")
+	}
+	return &authv1.OidcTokenResponse{
+		AccessToken:  tp.AccessToken,
+		IdToken:      idToken,
+		RefreshToken: tp.RefreshToken,
+		ExpiresIn:    tp.ExpiresIn,
+		TokenType:    "Bearer",
+		Scope:        scope,
+	}, nil
+}
+
+// verifyPKCE checks an RFC 7636 code_verifier against the stored challenge.
+func verifyPKCE(challenge, method, verifier string) bool {
+	switch method {
+	case "S256", "":
+		sum := sha256.Sum256([]byte(verifier))
+		return base64.RawURLEncoding.EncodeToString(sum[:]) == challenge
+	case "plain":
+		return verifier == challenge
+	default:
+		return false
+	}
 }
