@@ -104,10 +104,10 @@ func (h *AuthHandler) ExchangeAuthorizationCode(ctx context.Context, req *authv1
 	codeHash := hex.EncodeToString(sum[:])
 
 	var (
-		clientID, redirectURI, scope    string
-		userID                          uuid.UUID
-		challenge, method, nonce        pgtype.Text
-		used, expired                   bool
+		clientID, redirectURI, scope string
+		userID                       uuid.UUID
+		challenge, method, nonce     pgtype.Text
+		used, expired                bool
 	)
 	err := h.pool.QueryRow(ctx,
 		`SELECT client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, nonce, used, (expires_at < now())

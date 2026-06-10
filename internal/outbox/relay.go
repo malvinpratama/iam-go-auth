@@ -13,8 +13,8 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/malvinpratama/iam-go-libs/events"
 	"github.com/malvinpratama/iam-go-auth/internal/db"
+	"github.com/malvinpratama/iam-go-libs/events"
 )
 
 // Relay drains the outbox to the broker on an interval.

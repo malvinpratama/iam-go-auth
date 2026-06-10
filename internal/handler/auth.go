@@ -16,14 +16,14 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	authv1 "github.com/malvinpratama/iam-go-contracts/gen/auth/v1"
-	"github.com/malvinpratama/iam-go-libs/config"
+	"github.com/malvinpratama/iam-go-auth/internal/db"
 	"github.com/malvinpratama/iam-go-auth/internal/email"
-	"github.com/malvinpratama/iam-go-libs/events"
-	"github.com/malvinpratama/iam-go-libs/grpcutil"
 	"github.com/malvinpratama/iam-go-auth/internal/jwt"
 	"github.com/malvinpratama/iam-go-auth/internal/password"
-	"github.com/malvinpratama/iam-go-auth/internal/db"
+	authv1 "github.com/malvinpratama/iam-go-contracts/gen/auth/v1"
+	"github.com/malvinpratama/iam-go-libs/config"
+	"github.com/malvinpratama/iam-go-libs/events"
+	"github.com/malvinpratama/iam-go-libs/grpcutil"
 )
 
 const defaultRole = "user"
