@@ -13,19 +13,19 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 
+	auth "github.com/malvinpratama/iam-go-auth"
+	authdb "github.com/malvinpratama/iam-go-auth/internal/db"
+	"github.com/malvinpratama/iam-go-auth/internal/email"
+	"github.com/malvinpratama/iam-go-auth/internal/handler"
+	"github.com/malvinpratama/iam-go-auth/internal/jwt"
+	"github.com/malvinpratama/iam-go-auth/internal/outbox"
 	authv1 "github.com/malvinpratama/iam-go-contracts/gen/auth/v1"
 	"github.com/malvinpratama/iam-go-libs/config"
 	"github.com/malvinpratama/iam-go-libs/db"
-	"github.com/malvinpratama/iam-go-auth/internal/email"
 	"github.com/malvinpratama/iam-go-libs/events"
-	"github.com/malvinpratama/iam-go-auth/internal/jwt"
 	"github.com/malvinpratama/iam-go-libs/logger"
 	"github.com/malvinpratama/iam-go-libs/migrate"
 	"github.com/malvinpratama/iam-go-libs/obs"
-	auth "github.com/malvinpratama/iam-go-auth"
-	authdb "github.com/malvinpratama/iam-go-auth/internal/db"
-	"github.com/malvinpratama/iam-go-auth/internal/handler"
-	"github.com/malvinpratama/iam-go-auth/internal/outbox"
 )
 
 func main() {
