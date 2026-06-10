@@ -60,6 +60,27 @@ func (m *Manager) Issue(userID, email string) (string, error) {
 	return tok.SignedString(m.active.Private)
 }
 
+// IssueIDToken signs an OIDC ID token (RS256) for the given subject, audience
+// (client_id) and optional nonce. `issuer` is the public OIDC issuer URL so
+// relying parties' issuer check passes.
+func (m *Manager) IssueIDToken(sub, email, audience, nonce, issuer string) (string, error) {
+	now := time.Now()
+	claims := jwt.MapClaims{
+		"iss":   issuer,
+		"sub":   sub,
+		"aud":   audience,
+		"iat":   now.Unix(),
+		"exp":   now.Add(m.accessTTL).Unix(),
+		"email": email,
+	}
+	if nonce != "" {
+		claims["nonce"] = nonce
+	}
+	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	tok.Header["kid"] = m.active.Kid
+	return tok.SignedString(m.active.Private)
+}
+
 // Parse validates a token string and returns its claims. The signing key is
 // selected by the token's `kid` header so rotated keys still verify.
 func (m *Manager) Parse(tokenStr string) (*Claims, error) {
