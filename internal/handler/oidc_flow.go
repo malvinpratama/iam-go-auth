@@ -119,8 +119,11 @@ func (h *AuthHandler) ExchangeAuthorizationCode(ctx context.Context, req *authv1
 	if used || expired || clientID != req.GetClientId() || redirectURI != req.GetRedirectUri() {
 		return nil, status.Error(codes.InvalidArgument, "invalid_grant")
 	}
-	// Single-use: burn the code immediately.
-	_, _ = h.pool.Exec(ctx, `UPDATE oauth_authorization_codes SET used = true WHERE code_hash = $1`, codeHash)
+	// Single-use: atomically claim the code (closes the check-then-set race).
+	tag, err := h.pool.Exec(ctx, `UPDATE oauth_authorization_codes SET used = true WHERE code_hash = $1 AND used = false`, codeHash)
+	if err != nil || tag.RowsAffected() != 1 {
+		return nil, status.Error(codes.InvalidArgument, "invalid_grant")
+	}
 
 	hasPKCE := challenge.Valid && challenge.String != ""
 	if hasPKCE && !verifyPKCE(challenge.String, method.String, req.GetCodeVerifier()) {
@@ -211,10 +214,10 @@ func BootstrapOIDCClient(ctx context.Context, pool *pgxpool.Pool) error {
 // verifyPKCE checks an RFC 7636 code_verifier against the stored challenge.
 func verifyPKCE(challenge, method, verifier string) bool {
 	switch method {
-	case "S256", "":
+	case "S256":
 		sum := sha256.Sum256([]byte(verifier))
 		return base64.RawURLEncoding.EncodeToString(sum[:]) == challenge
-	case "plain":
+	case "plain", "": // RFC 7636: default method is "plain"
 		return verifier == challenge
 	default:
 		return false
