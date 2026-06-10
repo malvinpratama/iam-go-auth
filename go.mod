@@ -6,15 +6,17 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/malvinpratama/iam-go-contracts v0.6.0
-	github.com/malvinpratama/iam-go-libs v0.5.0
+	github.com/malvinpratama/iam-go-contracts v0.7.0
+	github.com/malvinpratama/iam-go-libs v0.6.0
 	github.com/nats-io/nats.go v1.52.0
+	github.com/pquerna/otp v1.5.0
 	golang.org/x/crypto v0.51.0
 	google.golang.org/grpc v1.81.1
 )
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/exaring/otelpgx v0.11.1 // indirect
