@@ -75,6 +75,10 @@ func main() {
 		log.Error("bootstrap admin", "err", err)
 		os.Exit(1)
 	}
+	if err := handler.BootstrapOIDCClient(ctx, pool); err != nil {
+		log.Error("bootstrap oidc client", "err", err)
+		os.Exit(1)
+	}
 
 	jwtCfg := config.LoadJWT()
 	keys, err := jwt.LoadKeys(ctx, pool)
