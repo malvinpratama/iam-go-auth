@@ -8,9 +8,12 @@ import (
 	"encoding/hex"
 	"errors"
 
+	"strings"
+
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -163,6 +166,46 @@ func (h *AuthHandler) ExchangeAuthorizationCode(ctx context.Context, req *authv1
 		TokenType:    "Bearer",
 		Scope:        scope,
 	}, nil
+}
+
+// RegisterClient creates a new OAuth client; the secret is returned once (plaintext).
+func (h *AuthHandler) RegisterClient(ctx context.Context, req *authv1.RegisterClientRequest) (*authv1.RegisterClientResponse, error) {
+	clientID := uuid.NewString()
+	var secret string
+	var secretHash *string
+	if req.GetIsConfidential() {
+		secret = randCode()
+		sum := sha256.Sum256([]byte(secret))
+		enc := hex.EncodeToString(sum[:])
+		secretHash = &enc
+	}
+	scopes := req.GetScopes()
+	if len(scopes) == 0 {
+		scopes = []string{"openid", "profile", "email"}
+	}
+	if _, err := h.pool.Exec(ctx,
+		`INSERT INTO oauth_clients (client_id, client_secret_hash, name, redirect_uris, scopes, grant_types, is_confidential)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		clientID, secretHash, req.GetName(), req.GetRedirectUris(), scopes,
+		[]string{"authorization_code", "refresh_token"}, req.GetIsConfidential()); err != nil {
+		return nil, status.Error(codes.Internal, "could not register client")
+	}
+	return &authv1.RegisterClientResponse{ClientId: clientID, ClientSecret: secret}, nil
+}
+
+// BootstrapOIDCClient seeds a demo confidential client (the admin console) on
+// first boot, configurable via env. Idempotent.
+func BootstrapOIDCClient(ctx context.Context, pool *pgxpool.Pool) error {
+	clientID := config.Getenv("OIDC_CONSOLE_CLIENT_ID", "iam-admin-console")
+	secret := config.Getenv("OIDC_CONSOLE_SECRET", "console-demo-secret-change-me")
+	redirects := strings.Split(config.Getenv("OIDC_CONSOLE_REDIRECT_URIS", "http://localhost:3000/api/auth/callback/iam"), ",")
+	sum := sha256.Sum256([]byte(secret))
+	_, err := pool.Exec(ctx,
+		`INSERT INTO oauth_clients (client_id, client_secret_hash, name, redirect_uris, scopes, grant_types, is_confidential)
+		 VALUES ($1,$2,'IAM Admin Console',$3, ARRAY['openid','profile','email'], ARRAY['authorization_code','refresh_token'], true)
+		 ON CONFLICT (client_id) DO NOTHING`,
+		clientID, hex.EncodeToString(sum[:]), redirects)
+	return err
 }
 
 // verifyPKCE checks an RFC 7636 code_verifier against the stored challenge.
