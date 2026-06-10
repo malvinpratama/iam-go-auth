@@ -15,6 +15,10 @@ import (
 // Claims is the JWT payload for an access token.
 type Claims struct {
 	Email string `json:"email"`
+	// Purpose distinguishes token kinds. Empty for a normal access token;
+	// "mfa" for the short-lived token issued between the password step and the
+	// TOTP step of a 2FA login (it must NOT be accepted as an access token).
+	Purpose string `json:"purpose,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -53,6 +57,25 @@ func (m *Manager) Issue(userID, email string) (string, error) {
 			Issuer:    m.issuer,
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(m.accessTTL)),
+		},
+	}
+	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	tok.Header["kid"] = m.active.Kid
+	return tok.SignedString(m.active.Private)
+}
+
+// IssueMFA signs a short-lived token proving the password step of a 2FA login
+// passed. It carries purpose="mfa" and no jti (not revocable, not an access
+// token); LoginTotp exchanges it + a TOTP/recovery code for a real token pair.
+func (m *Manager) IssueMFA(userID string, ttl time.Duration) (string, error) {
+	now := time.Now()
+	claims := Claims{
+		Purpose: "mfa",
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   userID,
+			Issuer:    m.issuer,
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
 		},
 	}
 	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)

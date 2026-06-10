@@ -54,6 +54,52 @@ func (q *Queries) ConsumePasswordReset(ctx context.Context, tokenHash string) (u
 	return user_id, err
 }
 
+const consumeRecoveryCode = `-- name: ConsumeRecoveryCode :one
+UPDATE totp_recovery_codes SET used_at = now()
+WHERE user_id = $1 AND code_hash = $2 AND used_at IS NULL
+RETURNING id
+`
+
+type ConsumeRecoveryCodeParams struct {
+	UserID   uuid.UUID
+	CodeHash string
+}
+
+func (q *Queries) ConsumeRecoveryCode(ctx context.Context, arg ConsumeRecoveryCodeParams) (int64, error) {
+	row := q.db.QueryRow(ctx, consumeRecoveryCode, arg.UserID, arg.CodeHash)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
+const createApiKey = `-- name: CreateApiKey :exec
+
+INSERT INTO api_keys (id, user_id, key_hash, name, scopes, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6)
+`
+
+type CreateApiKeyParams struct {
+	ID        string
+	UserID    uuid.UUID
+	KeyHash   string
+	Name      string
+	Scopes    []string
+	ExpiresAt pgtype.Timestamptz
+}
+
+// ── API keys (v0.9) ─────────────────────────────────────────
+func (q *Queries) CreateApiKey(ctx context.Context, arg CreateApiKeyParams) error {
+	_, err := q.db.Exec(ctx, createApiKey,
+		arg.ID,
+		arg.UserID,
+		arg.KeyHash,
+		arg.Name,
+		arg.Scopes,
+		arg.ExpiresAt,
+	)
+	return err
+}
+
 const createEmailVerification = `-- name: CreateEmailVerification :exec
 INSERT INTO email_verifications (token_hash, user_id, expires_at) VALUES ($1, $2, $3)
 `
@@ -167,6 +213,15 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (CreateU
 	return i, err
 }
 
+const deleteRecoveryCodes = `-- name: DeleteRecoveryCodes :exec
+DELETE FROM totp_recovery_codes WHERE user_id = $1
+`
+
+func (q *Queries) DeleteRecoveryCodes(ctx context.Context, userID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deleteRecoveryCodes, userID)
+	return err
+}
+
 const deleteRole = `-- name: DeleteRole :exec
 DELETE FROM roles WHERE name = $1
 `
@@ -183,6 +238,91 @@ DELETE FROM users WHERE id = $1
 func (q *Queries) DeleteUser(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, deleteUser, id)
 	return err
+}
+
+const disableTotp = `-- name: DisableTotp :exec
+UPDATE users SET totp_secret = NULL, totp_enabled = false, updated_at = now() WHERE id = $1
+`
+
+func (q *Queries) DisableTotp(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, disableTotp, id)
+	return err
+}
+
+const enableTotp = `-- name: EnableTotp :exec
+UPDATE users SET totp_enabled = true, updated_at = now() WHERE id = $1
+`
+
+func (q *Queries) EnableTotp(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, enableTotp, id)
+	return err
+}
+
+const fetchUnpublishedOutbox = `-- name: FetchUnpublishedOutbox :many
+SELECT id, aggregate_id, event_type, payload
+FROM outbox
+WHERE published_at IS NULL
+ORDER BY created_at
+LIMIT $1
+`
+
+type FetchUnpublishedOutboxRow struct {
+	ID          uuid.UUID
+	AggregateID uuid.UUID
+	EventType   string
+	Payload     []byte
+}
+
+func (q *Queries) FetchUnpublishedOutbox(ctx context.Context, limit int32) ([]FetchUnpublishedOutboxRow, error) {
+	rows, err := q.db.Query(ctx, fetchUnpublishedOutbox, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []FetchUnpublishedOutboxRow
+	for rows.Next() {
+		var i FetchUnpublishedOutboxRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.AggregateID,
+			&i.EventType,
+			&i.Payload,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getApiKeyByHash = `-- name: GetApiKeyByHash :one
+SELECT id, user_id, scopes, expires_at, revoked_at
+FROM api_keys
+WHERE key_hash = $1
+`
+
+type GetApiKeyByHashRow struct {
+	ID        string
+	UserID    uuid.UUID
+	Scopes    []string
+	ExpiresAt pgtype.Timestamptz
+	RevokedAt pgtype.Timestamptz
+}
+
+func (q *Queries) GetApiKeyByHash(ctx context.Context, keyHash string) (GetApiKeyByHashRow, error) {
+	row := q.db.QueryRow(ctx, getApiKeyByHash, keyHash)
+	var i GetApiKeyByHashRow
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Scopes,
+		&i.ExpiresAt,
+		&i.RevokedAt,
+	)
+	return i, err
 }
 
 const getRefreshToken = `-- name: GetRefreshToken :one
@@ -219,7 +359,7 @@ func (q *Queries) GetRoleByName(ctx context.Context, name string) (Role, error) 
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, email, password_hash, status, email_verified, failed_login_attempts, locked_until, created_at, updated_at
+SELECT id, email, password_hash, status, email_verified, failed_login_attempts, locked_until, totp_secret, totp_enabled, deleted_at, created_at, updated_at
 FROM users
 WHERE email = $1
 `
@@ -232,6 +372,9 @@ type GetUserByEmailRow struct {
 	EmailVerified       bool
 	FailedLoginAttempts int32
 	LockedUntil         pgtype.Timestamptz
+	TotpSecret          *string
+	TotpEnabled         bool
+	DeletedAt           pgtype.Timestamptz
 	CreatedAt           pgtype.Timestamptz
 	UpdatedAt           pgtype.Timestamptz
 }
@@ -247,6 +390,9 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (GetUserByEm
 		&i.EmailVerified,
 		&i.FailedLoginAttempts,
 		&i.LockedUntil,
+		&i.TotpSecret,
+		&i.TotpEnabled,
+		&i.DeletedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -254,7 +400,7 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (GetUserByEm
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, email, password_hash, status, email_verified, failed_login_attempts, locked_until, created_at, updated_at
+SELECT id, email, password_hash, status, email_verified, failed_login_attempts, locked_until, totp_secret, totp_enabled, deleted_at, created_at, updated_at
 FROM users
 WHERE id = $1
 `
@@ -267,6 +413,9 @@ type GetUserByIDRow struct {
 	EmailVerified       bool
 	FailedLoginAttempts int32
 	LockedUntil         pgtype.Timestamptz
+	TotpSecret          *string
+	TotpEnabled         bool
+	DeletedAt           pgtype.Timestamptz
 	CreatedAt           pgtype.Timestamptz
 	UpdatedAt           pgtype.Timestamptz
 }
@@ -282,6 +431,9 @@ func (q *Queries) GetUserByID(ctx context.Context, id uuid.UUID) (GetUserByIDRow
 		&i.EmailVerified,
 		&i.FailedLoginAttempts,
 		&i.LockedUntil,
+		&i.TotpSecret,
+		&i.TotpEnabled,
+		&i.DeletedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -400,6 +552,38 @@ func (q *Queries) InsertAuditEvent(ctx context.Context, arg InsertAuditEventPara
 	return err
 }
 
+const insertOutbox = `-- name: InsertOutbox :exec
+
+INSERT INTO outbox (aggregate_id, event_type, payload)
+VALUES ($1, $2, $3)
+`
+
+type InsertOutboxParams struct {
+	AggregateID uuid.UUID
+	EventType   string
+	Payload     []byte
+}
+
+// ── Transactional outbox ────────────────────────────────────
+func (q *Queries) InsertOutbox(ctx context.Context, arg InsertOutboxParams) error {
+	_, err := q.db.Exec(ctx, insertOutbox, arg.AggregateID, arg.EventType, arg.Payload)
+	return err
+}
+
+const insertRecoveryCode = `-- name: InsertRecoveryCode :exec
+INSERT INTO totp_recovery_codes (user_id, code_hash) VALUES ($1, $2)
+`
+
+type InsertRecoveryCodeParams struct {
+	UserID   uuid.UUID
+	CodeHash string
+}
+
+func (q *Queries) InsertRecoveryCode(ctx context.Context, arg InsertRecoveryCodeParams) error {
+	_, err := q.db.Exec(ctx, insertRecoveryCode, arg.UserID, arg.CodeHash)
+	return err
+}
+
 const isTokenRevoked = `-- name: IsTokenRevoked :one
 SELECT EXISTS(SELECT 1 FROM revoked_tokens WHERE jti = $1)
 `
@@ -409,6 +593,60 @@ func (q *Queries) IsTokenRevoked(ctx context.Context, jti string) (bool, error) 
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const isUserActive = `-- name: IsUserActive :one
+SELECT (deleted_at IS NULL)::boolean FROM users WHERE id = $1
+`
+
+func (q *Queries) IsUserActive(ctx context.Context, id uuid.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, isUserActive, id)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const listApiKeysByUser = `-- name: ListApiKeysByUser :many
+SELECT id, name, scopes, expires_at, last_used_at, created_at
+FROM api_keys
+WHERE user_id = $1 AND revoked_at IS NULL
+ORDER BY created_at DESC
+`
+
+type ListApiKeysByUserRow struct {
+	ID         string
+	Name       string
+	Scopes     []string
+	ExpiresAt  pgtype.Timestamptz
+	LastUsedAt pgtype.Timestamptz
+	CreatedAt  pgtype.Timestamptz
+}
+
+func (q *Queries) ListApiKeysByUser(ctx context.Context, userID uuid.UUID) ([]ListApiKeysByUserRow, error) {
+	rows, err := q.db.Query(ctx, listApiKeysByUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListApiKeysByUserRow
+	for rows.Next() {
+		var i ListApiKeysByUserRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Scopes,
+			&i.ExpiresAt,
+			&i.LastUsedAt,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listAuditEvents = `-- name: ListAuditEvents :many
@@ -549,12 +787,30 @@ func (q *Queries) MarkEmailVerified(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+const markOutboxPublished = `-- name: MarkOutboxPublished :exec
+UPDATE outbox SET published_at = now() WHERE id = $1
+`
+
+func (q *Queries) MarkOutboxPublished(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, markOutboxPublished, id)
+	return err
+}
+
 const resetLoginState = `-- name: ResetLoginState :exec
 UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE id = $1
 `
 
 func (q *Queries) ResetLoginState(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, resetLoginState, id)
+	return err
+}
+
+const restoreUser = `-- name: RestoreUser :exec
+UPDATE users SET deleted_at = NULL, updated_at = now() WHERE id = $1
+`
+
+func (q *Queries) RestoreUser(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, restoreUser, id)
 	return err
 }
 
@@ -580,6 +836,21 @@ UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at I
 
 func (q *Queries) RevokeAllUserRefreshTokens(ctx context.Context, userID uuid.UUID) error {
 	_, err := q.db.Exec(ctx, revokeAllUserRefreshTokens, userID)
+	return err
+}
+
+const revokeApiKey = `-- name: RevokeApiKey :exec
+UPDATE api_keys SET revoked_at = now()
+WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
+`
+
+type RevokeApiKeyParams struct {
+	ID     string
+	UserID uuid.UUID
+}
+
+func (q *Queries) RevokeApiKey(ctx context.Context, arg RevokeApiKeyParams) error {
+	_, err := q.db.Exec(ctx, revokeApiKey, arg.ID, arg.UserID)
 	return err
 }
 
@@ -623,6 +894,40 @@ type RevokeRoleFromUserParams struct {
 
 func (q *Queries) RevokeRoleFromUser(ctx context.Context, arg RevokeRoleFromUserParams) error {
 	_, err := q.db.Exec(ctx, revokeRoleFromUser, arg.UserID, arg.Name)
+	return err
+}
+
+const setTotpSecret = `-- name: SetTotpSecret :exec
+
+UPDATE users SET totp_secret = $2, totp_enabled = false, updated_at = now() WHERE id = $1
+`
+
+type SetTotpSecretParams struct {
+	ID         uuid.UUID
+	TotpSecret *string
+}
+
+// ── 2FA / TOTP (v0.9) ───────────────────────────────────────
+func (q *Queries) SetTotpSecret(ctx context.Context, arg SetTotpSecretParams) error {
+	_, err := q.db.Exec(ctx, setTotpSecret, arg.ID, arg.TotpSecret)
+	return err
+}
+
+const softDeleteUser = `-- name: SoftDeleteUser :exec
+UPDATE users SET deleted_at = now(), updated_at = now() WHERE id = $1 AND deleted_at IS NULL
+`
+
+func (q *Queries) SoftDeleteUser(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, softDeleteUser, id)
+	return err
+}
+
+const touchApiKey = `-- name: TouchApiKey :exec
+UPDATE api_keys SET last_used_at = now() WHERE id = $1
+`
+
+func (q *Queries) TouchApiKey(ctx context.Context, id string) error {
+	_, err := q.db.Exec(ctx, touchApiKey, id)
 	return err
 }
 
