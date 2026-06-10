@@ -1,13 +1,15 @@
-// Package jwt issues and verifies HS256 access tokens.
+// Package jwt issues and verifies RS256 access tokens. The signing key is an
+// RSA keypair (see keys.go); public keys are exposed via JWKS so external OIDC
+// relying parties can verify tokens without a shared secret.
 package jwt
 
 import (
+	"crypto/rsa"
 	"errors"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
-	"github.com/malvinpratama/iam-go-libs/config"
 )
 
 // Claims is the JWT payload for an access token.
@@ -16,24 +18,29 @@ type Claims struct {
 	jwt.RegisteredClaims
 }
 
-// Manager signs and parses access tokens.
+// Manager signs and parses access tokens with RS256.
 type Manager struct {
-	secret    []byte
+	active    SigningKey
+	verifiers map[string]*rsa.PublicKey // kid -> public key (active + rotated)
 	issuer    string
 	accessTTL time.Duration
 }
 
-// NewManager builds a Manager from JWT config.
-func NewManager(cfg config.JWTConfig) *Manager {
+// NewManager builds a Manager from a loaded key set and token settings.
+func NewManager(keys KeySet, issuer string, accessTTL time.Duration) *Manager {
 	return &Manager{
-		secret:    []byte(cfg.Secret),
-		issuer:    cfg.Issuer,
-		accessTTL: cfg.AccessTTL,
+		active:    keys.Active,
+		verifiers: keys.Verifiers,
+		issuer:    issuer,
+		accessTTL: accessTTL,
 	}
 }
 
 // AccessTTL exposes the configured access-token lifetime.
 func (m *Manager) AccessTTL() time.Duration { return m.accessTTL }
+
+// PublicKeys returns kid -> public key for building a JWKS document.
+func (m *Manager) PublicKeys() map[string]*rsa.PublicKey { return m.verifiers }
 
 // Issue creates a signed access token for the given user.
 func (m *Manager) Issue(userID, email string) (string, error) {
@@ -48,17 +55,25 @@ func (m *Manager) Issue(userID, email string) (string, error) {
 			ExpiresAt: jwt.NewNumericDate(now.Add(m.accessTTL)),
 		},
 	}
-	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(m.secret)
+	tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	tok.Header["kid"] = m.active.Kid
+	return tok.SignedString(m.active.Private)
 }
 
-// Parse validates a token string and returns its claims.
+// Parse validates a token string and returns its claims. The signing key is
+// selected by the token's `kid` header so rotated keys still verify.
 func (m *Manager) Parse(tokenStr string) (*Claims, error) {
 	claims := &Claims{}
 	token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (any, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+		if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
 			return nil, errors.New("unexpected signing method")
 		}
-		return m.secret, nil
+		kid, _ := t.Header["kid"].(string)
+		pub, ok := m.verifiers[kid]
+		if !ok {
+			return nil, errors.New("unknown key id")
+		}
+		return pub, nil
 	}, jwt.WithIssuer(m.issuer))
 	if err != nil {
 		return nil, err
