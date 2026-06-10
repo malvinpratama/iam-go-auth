@@ -77,7 +77,12 @@ func main() {
 	}
 
 	jwtCfg := config.LoadJWT()
-	h := handler.New(pool, jwt.NewManager(jwtCfg), jwtCfg.RefreshTTL, email.NewLogSender(log))
+	keys, err := jwt.LoadKeys(ctx, pool)
+	if err != nil {
+		log.Error("load signing keys", "err", err)
+		os.Exit(1)
+	}
+	h := handler.New(pool, jwt.NewManager(keys, jwtCfg.Issuer, jwtCfg.AccessTTL), jwtCfg.RefreshTTL, email.NewLogSender(log))
 
 	// Outbox relay: drain pending domain events to NATS JetStream. Optional —
 	// without NATS_URL the events are still recorded; the gateway's lazy profile
