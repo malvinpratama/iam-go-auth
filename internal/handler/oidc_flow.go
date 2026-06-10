@@ -173,6 +173,9 @@ func (h *AuthHandler) ExchangeAuthorizationCode(ctx context.Context, req *authv1
 
 // RegisterClient creates a new OAuth client; the secret is returned once (plaintext).
 func (h *AuthHandler) RegisterClient(ctx context.Context, req *authv1.RegisterClientRequest) (*authv1.RegisterClientResponse, error) {
+	if err := requirePerm(ctx, "role:write"); err != nil { // defense-in-depth (gateway also gates)
+		return nil, err
+	}
 	clientID := uuid.NewString()
 	var secret string
 	var secretHash *string
