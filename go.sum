@@ -46,6 +46,8 @@ github.com/malvinpratama/iam-go-contracts v0.4.0 h1:mYNxyiHsI5SKDKrpq6zx2Zy1bvtn
 github.com/malvinpratama/iam-go-contracts v0.4.0/go.mod h1:AWYPGQrCElFlL9gROJasUpMT1JcAdfpQAiM1QTPBI7k=
 github.com/malvinpratama/iam-go-contracts v0.5.0 h1:+Hc+Lt2i4UfY6MfQvkLgsWYa1MM2LDwvyWQQ8Yo/JUc=
 github.com/malvinpratama/iam-go-contracts v0.5.0/go.mod h1:AWYPGQrCElFlL9gROJasUpMT1JcAdfpQAiM1QTPBI7k=
+github.com/malvinpratama/iam-go-contracts v0.6.0 h1:T4H40DAPEbPlGUPD+/SFi8+7H33istHVpjH0uJDo1YA=
+github.com/malvinpratama/iam-go-contracts v0.6.0/go.mod h1:AWYPGQrCElFlL9gROJasUpMT1JcAdfpQAiM1QTPBI7k=
 github.com/malvinpratama/iam-go-libs v0.5.0 h1:d58QrAMTVmdd8L6Uk/ZtQQgfJiCvih2YTfJZQwdM+NU=
 github.com/malvinpratama/iam-go-libs v0.5.0/go.mod h1:IXrVs920bayKvzAy5WJZHM3WLpLOLkm6fCgF39HPu0M=
 github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 h1:C3w9PqII01/Oq1c1nUAm88MOHcQC9l5mIlSMApZMrHA=
