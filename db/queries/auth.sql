@@ -176,6 +176,29 @@ JOIN roles r ON r.id = ur.role_id
 WHERE ur.user_id = $1
 ORDER BY r.name;
 
+-- M6.3: permissions scoped to the token's tenant (and optional project).
+-- Tenant-wide assignments (project_id IS NULL) always apply; project-scoped
+-- assignments apply only when the token names that project. A NULL project_id
+-- (tenant-wide token) therefore yields only the tenant-wide roles.
+-- name: GetUserPermissionsScoped :many
+SELECT DISTINCT p.name
+FROM user_roles ur
+JOIN role_permissions rp ON rp.role_id = ur.role_id
+JOIN permissions p ON p.id = rp.permission_id
+WHERE ur.user_id = $1
+  AND ur.tenant_id = $2
+  AND (ur.project_id IS NULL OR ur.project_id = $3)
+ORDER BY p.name;
+
+-- name: GetUserRolesScoped :many
+SELECT r.name
+FROM user_roles ur
+JOIN roles r ON r.id = ur.role_id
+WHERE ur.user_id = $1
+  AND ur.tenant_id = $2
+  AND (ur.project_id IS NULL OR ur.project_id = $3)
+ORDER BY r.name;
+
 -- name: GetRoleByName :one
 SELECT id, name, description
 FROM roles

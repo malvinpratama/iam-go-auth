@@ -47,18 +47,29 @@ func (h *AuthHandler) SwitchTenant(ctx context.Context, req *authv1.SwitchTenant
 	if err != nil || !member {
 		return nil, status.Error(codes.PermissionDenied, "not a member of that tenant")
 	}
-	var project pgtype.UUID
-	if p := req.GetProjectId(); p != "" {
-		pid, perr := uuid.Parse(p)
-		if perr != nil {
+	if req.GetProjectId() != "" {
+		if _, perr := uuid.Parse(req.GetProjectId()); perr != nil {
 			return nil, status.Error(codes.InvalidArgument, "invalid project id")
 		}
-		project = pgtype.UUID{Bytes: pid, Valid: true}
 	}
+	project := parseOptionalUUID(req.GetProjectId())
 	user, err := h.q.GetUserByID(ctx, uid)
 	if err != nil {
 		return nil, status.Error(codes.NotFound, "user not found")
 	}
 	h.audit(ctx, "tenant.switch", req.GetTenantId(), req.GetProjectId())
 	return h.issueTokens(ctx, uid, user.Email, tid, project)
+}
+
+// parseOptionalUUID converts an optional UUID string to a pgtype.UUID; an empty
+// or unparseable string yields an invalid (SQL NULL) value.
+func parseOptionalUUID(s string) pgtype.UUID {
+	if s == "" {
+		return pgtype.UUID{}
+	}
+	id, err := uuid.Parse(s)
+	if err != nil {
+		return pgtype.UUID{}
+	}
+	return pgtype.UUID{Bytes: id, Valid: true}
 }

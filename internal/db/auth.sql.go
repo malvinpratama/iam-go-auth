@@ -530,6 +530,47 @@ func (q *Queries) GetUserPermissions(ctx context.Context, userID uuid.UUID) ([]s
 	return items, nil
 }
 
+const getUserPermissionsScoped = `-- name: GetUserPermissionsScoped :many
+SELECT DISTINCT p.name
+FROM user_roles ur
+JOIN role_permissions rp ON rp.role_id = ur.role_id
+JOIN permissions p ON p.id = rp.permission_id
+WHERE ur.user_id = $1
+  AND ur.tenant_id = $2
+  AND (ur.project_id IS NULL OR ur.project_id = $3)
+ORDER BY p.name
+`
+
+type GetUserPermissionsScopedParams struct {
+	UserID    uuid.UUID
+	TenantID  uuid.UUID
+	ProjectID pgtype.UUID
+}
+
+// M6.3: permissions scoped to the token's tenant (and optional project).
+// Tenant-wide assignments (project_id IS NULL) always apply; project-scoped
+// assignments apply only when the token names that project. A NULL project_id
+// (tenant-wide token) therefore yields only the tenant-wide roles.
+func (q *Queries) GetUserPermissionsScoped(ctx context.Context, arg GetUserPermissionsScopedParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, getUserPermissionsScoped, arg.UserID, arg.TenantID, arg.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		items = append(items, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getUserRoles = `-- name: GetUserRoles :many
 SELECT r.name
 FROM user_roles ur
@@ -540,6 +581,42 @@ ORDER BY r.name
 
 func (q *Queries) GetUserRoles(ctx context.Context, userID uuid.UUID) ([]string, error) {
 	rows, err := q.db.Query(ctx, getUserRoles, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		items = append(items, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getUserRolesScoped = `-- name: GetUserRolesScoped :many
+SELECT r.name
+FROM user_roles ur
+JOIN roles r ON r.id = ur.role_id
+WHERE ur.user_id = $1
+  AND ur.tenant_id = $2
+  AND (ur.project_id IS NULL OR ur.project_id = $3)
+ORDER BY r.name
+`
+
+type GetUserRolesScopedParams struct {
+	UserID    uuid.UUID
+	TenantID  uuid.UUID
+	ProjectID pgtype.UUID
+}
+
+func (q *Queries) GetUserRolesScoped(ctx context.Context, arg GetUserRolesScopedParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, getUserRolesScoped, arg.UserID, arg.TenantID, arg.ProjectID)
 	if err != nil {
 		return nil, err
 	}
