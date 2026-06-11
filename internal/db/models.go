@@ -125,14 +125,15 @@ type Project struct {
 }
 
 type RefreshToken struct {
-	ID        uuid.UUID
-	UserID    uuid.UUID
-	TokenHash string
-	ExpiresAt pgtype.Timestamptz
-	RevokedAt pgtype.Timestamptz
-	CreatedAt pgtype.Timestamptz
-	TenantID  uuid.UUID
-	ProjectID pgtype.UUID
+	ID         uuid.UUID
+	UserID     uuid.UUID
+	TokenHash  string
+	ExpiresAt  pgtype.Timestamptz
+	RevokedAt  pgtype.Timestamptz
+	CreatedAt  pgtype.Timestamptz
+	TenantID   uuid.UUID
+	ProjectID  pgtype.UUID
+	ReplacedBy *string
 }
 
 type RevokedToken struct {

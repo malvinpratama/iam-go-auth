@@ -12,6 +12,25 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const assignRoleInTenant = `-- name: AssignRoleInTenant :exec
+INSERT INTO user_roles (user_id, role_id, tenant_id)
+SELECT $1, r.id, $3 FROM roles r WHERE r.name = $2 AND r.tenant_id IS NULL
+ON CONFLICT DO NOTHING
+`
+
+type AssignRoleInTenantParams struct {
+	UserID   uuid.UUID
+	Name     string
+	TenantID uuid.UUID
+}
+
+// AssignRoleInTenant grants a built-in role (template, tenant_id IS NULL) to a
+// user scoped to a specific tenant — used to make a tenant's creator its admin.
+func (q *Queries) AssignRoleInTenant(ctx context.Context, arg AssignRoleInTenantParams) error {
+	_, err := q.db.Exec(ctx, assignRoleInTenant, arg.UserID, arg.Name, arg.TenantID)
+	return err
+}
+
 const assignRoleToUser = `-- name: AssignRoleToUser :exec
 INSERT INTO user_roles (user_id, role_id)
 SELECT $1, r.id FROM roles r WHERE r.name = $2
@@ -147,6 +166,36 @@ func (q *Queries) CreatePasswordReset(ctx context.Context, arg CreatePasswordRes
 	return err
 }
 
+const createProject = `-- name: CreateProject :one
+INSERT INTO projects (tenant_id, slug, name) VALUES ($1, $2, $3)
+RETURNING id, tenant_id, slug, name
+`
+
+type CreateProjectParams struct {
+	TenantID uuid.UUID
+	Slug     string
+	Name     string
+}
+
+type CreateProjectRow struct {
+	ID       uuid.UUID
+	TenantID uuid.UUID
+	Slug     string
+	Name     string
+}
+
+func (q *Queries) CreateProject(ctx context.Context, arg CreateProjectParams) (CreateProjectRow, error) {
+	row := q.db.QueryRow(ctx, createProject, arg.TenantID, arg.Slug, arg.Name)
+	var i CreateProjectRow
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.Slug,
+		&i.Name,
+	)
+	return i, err
+}
+
 const createRefreshToken = `-- name: CreateRefreshToken :one
 INSERT INTO refresh_tokens (user_id, token_hash, expires_at, tenant_id, project_id)
 VALUES ($1, $2, $3, $4, $5)
@@ -209,6 +258,36 @@ func (q *Queries) CreateRole(ctx context.Context, arg CreateRoleParams) (CreateR
 	row := q.db.QueryRow(ctx, createRole, arg.Name, arg.Description)
 	var i CreateRoleRow
 	err := row.Scan(&i.ID, &i.Name, &i.Description)
+	return i, err
+}
+
+const createTenant = `-- name: CreateTenant :one
+INSERT INTO tenants (slug, name) VALUES ($1, $2)
+RETURNING id, slug, name, status
+`
+
+type CreateTenantParams struct {
+	Slug string
+	Name string
+}
+
+type CreateTenantRow struct {
+	ID     uuid.UUID
+	Slug   string
+	Name   string
+	Status string
+}
+
+// M6.4: tenant / project / member administration.
+func (q *Queries) CreateTenant(ctx context.Context, arg CreateTenantParams) (CreateTenantRow, error) {
+	row := q.db.QueryRow(ctx, createTenant, arg.Slug, arg.Name)
+	var i CreateTenantRow
+	err := row.Scan(
+		&i.ID,
+		&i.Slug,
+		&i.Name,
+		&i.Status,
+	)
 	return i, err
 }
 
@@ -368,20 +447,21 @@ func (q *Queries) GetDefaultProject(ctx context.Context, tenantID uuid.UUID) (uu
 }
 
 const getRefreshToken = `-- name: GetRefreshToken :one
-SELECT id, user_id, token_hash, expires_at, revoked_at, tenant_id, project_id, created_at
+SELECT id, user_id, token_hash, expires_at, revoked_at, replaced_by, tenant_id, project_id, created_at
 FROM refresh_tokens
 WHERE token_hash = $1
 `
 
 type GetRefreshTokenRow struct {
-	ID        uuid.UUID
-	UserID    uuid.UUID
-	TokenHash string
-	ExpiresAt pgtype.Timestamptz
-	RevokedAt pgtype.Timestamptz
-	TenantID  uuid.UUID
-	ProjectID pgtype.UUID
-	CreatedAt pgtype.Timestamptz
+	ID         uuid.UUID
+	UserID     uuid.UUID
+	TokenHash  string
+	ExpiresAt  pgtype.Timestamptz
+	RevokedAt  pgtype.Timestamptz
+	ReplacedBy *string
+	TenantID   uuid.UUID
+	ProjectID  pgtype.UUID
+	CreatedAt  pgtype.Timestamptz
 }
 
 func (q *Queries) GetRefreshToken(ctx context.Context, tokenHash string) (GetRefreshTokenRow, error) {
@@ -393,6 +473,7 @@ func (q *Queries) GetRefreshToken(ctx context.Context, tokenHash string) (GetRef
 		&i.TokenHash,
 		&i.ExpiresAt,
 		&i.RevokedAt,
+		&i.ReplacedBy,
 		&i.TenantID,
 		&i.ProjectID,
 		&i.CreatedAt,
@@ -850,6 +931,40 @@ func (q *Queries) ListAuditEvents(ctx context.Context, limit int32) ([]ListAudit
 	return items, nil
 }
 
+const listMembersByTenant = `-- name: ListMembersByTenant :many
+SELECT u.id AS user_id, u.email, m.status
+FROM memberships m
+JOIN users u ON u.id = m.user_id
+WHERE m.tenant_id = $1
+ORDER BY u.email
+`
+
+type ListMembersByTenantRow struct {
+	UserID uuid.UUID
+	Email  string
+	Status string
+}
+
+func (q *Queries) ListMembersByTenant(ctx context.Context, tenantID uuid.UUID) ([]ListMembersByTenantRow, error) {
+	rows, err := q.db.Query(ctx, listMembersByTenant, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListMembersByTenantRow
+	for rows.Next() {
+		var i ListMembersByTenantRow
+		if err := rows.Scan(&i.UserID, &i.Email, &i.Status); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMembershipsByUser = `-- name: ListMembershipsByUser :many
 SELECT m.tenant_id, t.slug AS tenant_slug, t.name AS tenant_name, m.status
 FROM memberships m
@@ -906,6 +1021,42 @@ func (q *Queries) ListPermissions(ctx context.Context) ([]Permission, error) {
 	for rows.Next() {
 		var i Permission
 		if err := rows.Scan(&i.ID, &i.Name, &i.Description); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProjectsByTenant = `-- name: ListProjectsByTenant :many
+SELECT id, tenant_id, slug, name FROM projects WHERE tenant_id = $1 ORDER BY name
+`
+
+type ListProjectsByTenantRow struct {
+	ID       uuid.UUID
+	TenantID uuid.UUID
+	Slug     string
+	Name     string
+}
+
+func (q *Queries) ListProjectsByTenant(ctx context.Context, tenantID uuid.UUID) ([]ListProjectsByTenantRow, error) {
+	rows, err := q.db.Query(ctx, listProjectsByTenant, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListProjectsByTenantRow
+	for rows.Next() {
+		var i ListProjectsByTenantRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.Slug,
+			&i.Name,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -1019,6 +1170,42 @@ func (q *Queries) ListRolesWithPermissions(ctx context.Context) ([]ListRolesWith
 	return items, nil
 }
 
+const listTenants = `-- name: ListTenants :many
+SELECT id, slug, name, status FROM tenants ORDER BY name
+`
+
+type ListTenantsRow struct {
+	ID     uuid.UUID
+	Slug   string
+	Name   string
+	Status string
+}
+
+func (q *Queries) ListTenants(ctx context.Context) ([]ListTenantsRow, error) {
+	rows, err := q.db.Query(ctx, listTenants)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTenantsRow
+	for rows.Next() {
+		var i ListTenantsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Slug,
+			&i.Name,
+			&i.Status,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockUser = `-- name: LockUser :exec
 UPDATE users SET locked_until = $2, failed_login_attempts = 0 WHERE id = $1
 `
@@ -1048,6 +1235,20 @@ UPDATE outbox SET published_at = now() WHERE id = $1
 
 func (q *Queries) MarkOutboxPublished(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, markOutboxPublished, id)
+	return err
+}
+
+const removeMember = `-- name: RemoveMember :exec
+DELETE FROM memberships WHERE user_id = $1 AND tenant_id = $2
+`
+
+type RemoveMemberParams struct {
+	UserID   uuid.UUID
+	TenantID uuid.UUID
+}
+
+func (q *Queries) RemoveMember(ctx context.Context, arg RemoveMemberParams) error {
+	_, err := q.db.Exec(ctx, removeMember, arg.UserID, arg.TenantID)
 	return err
 }
 
@@ -1149,6 +1350,25 @@ type RevokeRoleFromUserParams struct {
 
 func (q *Queries) RevokeRoleFromUser(ctx context.Context, arg RevokeRoleFromUserParams) error {
 	_, err := q.db.Exec(ctx, revokeRoleFromUser, arg.UserID, arg.Name)
+	return err
+}
+
+const rotateRefreshToken = `-- name: RotateRefreshToken :exec
+UPDATE refresh_tokens
+SET revoked_at = now(), replaced_by = $2
+WHERE token_hash = $1 AND revoked_at IS NULL
+`
+
+type RotateRefreshTokenParams struct {
+	TokenHash  string
+	ReplacedBy *string
+}
+
+// RotateRefreshToken marks a token as rotated (revoked) and records its
+// successor, so a concurrent re-presentation within the grace window can be told
+// apart from a logout-revoked token (which leaves replaced_by NULL).
+func (q *Queries) RotateRefreshToken(ctx context.Context, arg RotateRefreshTokenParams) error {
+	_, err := q.db.Exec(ctx, rotateRefreshToken, arg.TokenHash, arg.ReplacedBy)
 	return err
 }
 
