@@ -44,6 +44,11 @@ func (h *AuthHandler) EnrollTotp(ctx context.Context, _ *authv1.EnrollTotpReques
 	if err != nil {
 		return nil, status.Error(codes.NotFound, "user not found")
 	}
+	// Re-enrolling would reset the secret and silently disable working 2FA;
+	// require an explicit disable first.
+	if user.TotpEnabled {
+		return nil, status.Error(codes.FailedPrecondition, "2FA is already enabled; disable it first")
+	}
 	secret, err := totp.Generate(user.Email)
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to generate secret")
@@ -64,6 +69,19 @@ func (h *AuthHandler) EnrollTotp(ctx context.Context, _ *authv1.EnrollTotpReques
 	}
 	h.audit(ctx, "totp.enroll", "", "")
 	return &authv1.EnrollTotpResponse{Secret: secret.Base32, OtpauthUri: secret.OtpauthURI, RecoveryCodes: recoveryCodes}, nil
+}
+
+// GetTotpStatus reports whether 2FA is active for the caller.
+func (h *AuthHandler) GetTotpStatus(ctx context.Context, _ *authv1.GetTotpStatusRequest) (*authv1.GetTotpStatusResponse, error) {
+	uid, err := callerID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	user, err := h.q.GetUserByID(ctx, uid)
+	if err != nil {
+		return nil, status.Error(codes.NotFound, "user not found")
+	}
+	return &authv1.GetTotpStatusResponse{Enabled: user.TotpEnabled}, nil
 }
 
 // ActivateTotp turns on 2FA after the caller proves the authenticator works.
