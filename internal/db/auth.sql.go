@@ -174,9 +174,15 @@ type CreateRoleParams struct {
 	Description string
 }
 
-func (q *Queries) CreateRole(ctx context.Context, arg CreateRoleParams) (Role, error) {
+type CreateRoleRow struct {
+	ID          int64
+	Name        string
+	Description string
+}
+
+func (q *Queries) CreateRole(ctx context.Context, arg CreateRoleParams) (CreateRoleRow, error) {
 	row := q.db.QueryRow(ctx, createRole, arg.Name, arg.Description)
-	var i Role
+	var i CreateRoleRow
 	err := row.Scan(&i.ID, &i.Name, &i.Description)
 	return i, err
 }
@@ -331,9 +337,18 @@ FROM refresh_tokens
 WHERE token_hash = $1
 `
 
-func (q *Queries) GetRefreshToken(ctx context.Context, tokenHash string) (RefreshToken, error) {
+type GetRefreshTokenRow struct {
+	ID        uuid.UUID
+	UserID    uuid.UUID
+	TokenHash string
+	ExpiresAt pgtype.Timestamptz
+	RevokedAt pgtype.Timestamptz
+	CreatedAt pgtype.Timestamptz
+}
+
+func (q *Queries) GetRefreshToken(ctx context.Context, tokenHash string) (GetRefreshTokenRow, error) {
 	row := q.db.QueryRow(ctx, getRefreshToken, tokenHash)
-	var i RefreshToken
+	var i GetRefreshTokenRow
 	err := row.Scan(
 		&i.ID,
 		&i.UserID,
@@ -351,9 +366,15 @@ FROM roles
 WHERE name = $1
 `
 
-func (q *Queries) GetRoleByName(ctx context.Context, name string) (Role, error) {
+type GetRoleByNameRow struct {
+	ID          int64
+	Name        string
+	Description string
+}
+
+func (q *Queries) GetRoleByName(ctx context.Context, name string) (GetRoleByNameRow, error) {
 	row := q.db.QueryRow(ctx, getRoleByName, name)
-	var i Role
+	var i GetRoleByNameRow
 	err := row.Scan(&i.ID, &i.Name, &i.Description)
 	return i, err
 }
@@ -656,15 +677,25 @@ ORDER BY id DESC
 LIMIT $1
 `
 
-func (q *Queries) ListAuditEvents(ctx context.Context, limit int32) ([]AuditEvent, error) {
+type ListAuditEventsRow struct {
+	ID         int64
+	ActorID    string
+	ActorEmail string
+	Action     string
+	Target     string
+	Detail     string
+	CreatedAt  pgtype.Timestamptz
+}
+
+func (q *Queries) ListAuditEvents(ctx context.Context, limit int32) ([]ListAuditEventsRow, error) {
 	rows, err := q.db.Query(ctx, listAuditEvents, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []AuditEvent
+	var items []ListAuditEventsRow
 	for rows.Next() {
-		var i AuditEvent
+		var i ListAuditEventsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.ActorID,
@@ -744,15 +775,21 @@ FROM roles
 ORDER BY name
 `
 
-func (q *Queries) ListRoles(ctx context.Context) ([]Role, error) {
+type ListRolesRow struct {
+	ID          int64
+	Name        string
+	Description string
+}
+
+func (q *Queries) ListRoles(ctx context.Context) ([]ListRolesRow, error) {
 	rows, err := q.db.Query(ctx, listRoles)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Role
+	var items []ListRolesRow
 	for rows.Next() {
-		var i Role
+		var i ListRolesRow
 		if err := rows.Scan(&i.ID, &i.Name, &i.Description); err != nil {
 			return nil, err
 		}
@@ -999,9 +1036,15 @@ type UpdateRoleParams struct {
 	Description string
 }
 
-func (q *Queries) UpdateRole(ctx context.Context, arg UpdateRoleParams) (Role, error) {
+type UpdateRoleRow struct {
+	ID          int64
+	Name        string
+	Description string
+}
+
+func (q *Queries) UpdateRole(ctx context.Context, arg UpdateRoleParams) (UpdateRoleRow, error) {
 	row := q.db.QueryRow(ctx, updateRole, arg.Name, arg.Description)
-	var i Role
+	var i UpdateRoleRow
 	err := row.Scan(&i.ID, &i.Name, &i.Description)
 	return i, err
 }

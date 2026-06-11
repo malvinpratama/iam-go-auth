@@ -19,6 +19,8 @@ type ApiKey struct {
 	RevokedAt  pgtype.Timestamptz
 	LastUsedAt pgtype.Timestamptz
 	CreatedAt  pgtype.Timestamptz
+	TenantID   uuid.UUID
+	ProjectID  pgtype.UUID
 }
 
 type AuditEvent struct {
@@ -29,6 +31,7 @@ type AuditEvent struct {
 	Target     string
 	Detail     string
 	CreatedAt  pgtype.Timestamptz
+	TenantID   pgtype.UUID
 }
 
 type EmailVerification struct {
@@ -37,6 +40,13 @@ type EmailVerification struct {
 	ExpiresAt  pgtype.Timestamptz
 	ConsumedAt pgtype.Timestamptz
 	CreatedAt  pgtype.Timestamptz
+}
+
+type Membership struct {
+	UserID    uuid.UUID
+	TenantID  uuid.UUID
+	Status    string
+	CreatedAt pgtype.Timestamptz
 }
 
 type OauthAuthorizationCode struct {
@@ -62,6 +72,8 @@ type OauthClient struct {
 	Scopes           []string
 	IsConfidential   bool
 	CreatedAt        pgtype.Timestamptz
+	TenantID         uuid.UUID
+	DefaultProjectID pgtype.UUID
 }
 
 type OauthConsent struct {
@@ -87,6 +99,7 @@ type Outbox struct {
 	Payload     []byte
 	CreatedAt   pgtype.Timestamptz
 	PublishedAt pgtype.Timestamptz
+	TenantID    pgtype.UUID
 }
 
 type PasswordReset struct {
@@ -103,6 +116,14 @@ type Permission struct {
 	Description string
 }
 
+type Project struct {
+	ID        uuid.UUID
+	TenantID  uuid.UUID
+	Slug      string
+	Name      string
+	CreatedAt pgtype.Timestamptz
+}
+
 type RefreshToken struct {
 	ID        uuid.UUID
 	UserID    uuid.UUID
@@ -110,6 +131,8 @@ type RefreshToken struct {
 	ExpiresAt pgtype.Timestamptz
 	RevokedAt pgtype.Timestamptz
 	CreatedAt pgtype.Timestamptz
+	TenantID  uuid.UUID
+	ProjectID pgtype.UUID
 }
 
 type RevokedToken struct {
@@ -122,11 +145,20 @@ type Role struct {
 	ID          int64
 	Name        string
 	Description string
+	TenantID    pgtype.UUID
 }
 
 type RolePermission struct {
 	RoleID       int64
 	PermissionID int64
+}
+
+type Tenant struct {
+	ID        uuid.UUID
+	Slug      string
+	Name      string
+	Status    string
+	CreatedAt pgtype.Timestamptz
 }
 
 type TotpRecoveryCode struct {
@@ -153,6 +185,8 @@ type User struct {
 }
 
 type UserRole struct {
-	UserID uuid.UUID
-	RoleID int64
+	UserID    uuid.UUID
+	RoleID    int64
+	TenantID  uuid.UUID
+	ProjectID pgtype.UUID
 }
