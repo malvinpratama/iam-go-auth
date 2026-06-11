@@ -20,6 +20,7 @@ import (
 	"github.com/malvinpratama/iam-go-auth/internal/handler"
 	"github.com/malvinpratama/iam-go-auth/internal/jwt"
 	"github.com/malvinpratama/iam-go-auth/internal/outbox"
+	"github.com/malvinpratama/iam-go-auth/internal/saga"
 	authv1 "github.com/malvinpratama/iam-go-contracts/gen/auth/v1"
 	"github.com/malvinpratama/iam-go-libs/config"
 	"github.com/malvinpratama/iam-go-libs/db"
@@ -114,6 +115,8 @@ func main() {
 		}
 		go outbox.NewRelay(authdb.New(pool), js, log).Run(ctx)
 		log.Info("outbox relay started", "nats", url)
+		// Saga: roll back identities whose profile creation failed permanently.
+		saga.NewCompensator(authdb.New(pool), js, log).Start(ctx)
 	} else {
 		log.Warn("NATS_URL not set — event publishing disabled")
 	}
