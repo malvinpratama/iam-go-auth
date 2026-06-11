@@ -126,14 +126,35 @@ ON CONFLICT (jti) DO NOTHING;
 SELECT EXISTS(SELECT 1 FROM revoked_tokens WHERE jti = $1);
 
 -- name: CreateRefreshToken :one
-INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
-VALUES ($1, $2, $3)
+INSERT INTO refresh_tokens (user_id, token_hash, expires_at, tenant_id, project_id)
+VALUES ($1, $2, $3, $4, $5)
 RETURNING id, user_id, token_hash, expires_at, created_at;
 
 -- name: GetRefreshToken :one
-SELECT id, user_id, token_hash, expires_at, revoked_at, created_at
+SELECT id, user_id, token_hash, expires_at, revoked_at, tenant_id, project_id, created_at
 FROM refresh_tokens
 WHERE token_hash = $1;
+
+-- ── Multi-tenant (M6) ───────────────────────────────────────
+
+-- name: CreateMembership :exec
+INSERT INTO memberships (user_id, tenant_id) VALUES ($1, $2)
+ON CONFLICT (user_id, tenant_id) DO NOTHING;
+
+-- name: ListMembershipsByUser :many
+SELECT m.tenant_id, t.slug AS tenant_slug, t.name AS tenant_name, m.status
+FROM memberships m
+JOIN tenants t ON t.id = m.tenant_id
+WHERE m.user_id = $1 AND m.status = 'active'
+ORDER BY t.name;
+
+-- name: IsActiveMember :one
+SELECT EXISTS (
+  SELECT 1 FROM memberships WHERE user_id = $1 AND tenant_id = $2 AND status = 'active'
+)::boolean;
+
+-- name: GetDefaultProject :one
+SELECT id FROM projects WHERE tenant_id = $1 AND slug = 'default' LIMIT 1;
 
 -- name: RevokeRefreshToken :exec
 UPDATE refresh_tokens

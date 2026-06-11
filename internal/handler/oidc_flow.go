@@ -152,7 +152,9 @@ func (h *AuthHandler) ExchangeAuthorizationCode(ctx context.Context, req *authv1
 		return nil, status.Error(codes.Internal, "user lookup failed")
 	}
 
-	tp, err := h.issueTokens(ctx, userID, email)
+	// M6: bind to the user's active tenant. (Binding to the OIDC client's tenant
+	// is refined in a later phase.)
+	tp, err := h.issueForActiveTenant(ctx, userID, email)
 	if err != nil {
 		return nil, err
 	}
