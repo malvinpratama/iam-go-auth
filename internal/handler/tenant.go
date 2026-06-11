@@ -15,6 +15,29 @@ import (
 	"github.com/malvinpratama/iam-go-libs/grpcutil"
 )
 
+// withTenant runs fn inside a transaction that assumes the restricted iam_rls
+// role and sets app.tenant_id, so Postgres Row-Level Security enforces tenant
+// isolation on top of the app-layer WHERE (defense in depth). Because the policy
+// is fail-closed, a query that forgets its tenant filter still cannot read
+// another tenant's rows. fn receives a *db.Queries bound to the transaction.
+func (h *AuthHandler) withTenant(ctx context.Context, tenant uuid.UUID, fn func(*db.Queries) error) error {
+	tx, err := h.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "SET LOCAL ROLE iam_rls"); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, "SELECT set_config('app.tenant_id', $1, true)", tenant.String()); err != nil {
+		return err
+	}
+	if err := fn(h.q.WithTx(tx)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // activeTenant returns the tenant the caller's token is bound to (forwarded by
 // the gateway as x-tenant-id). Tenant-scoped admin operations act within it.
 func activeTenant(ctx context.Context) (uuid.UUID, error) {
@@ -161,8 +184,13 @@ func (h *AuthHandler) ListProjects(ctx context.Context, _ *authv1.ListProjectsRe
 	if err != nil {
 		return nil, err
 	}
-	rows, err := h.q.ListProjectsByTenant(ctx, tenant)
-	if err != nil {
+	// Read under RLS (iam_rls + app.tenant_id) so the DB also enforces isolation.
+	var rows []db.ListProjectsByTenantRow
+	if err := h.withTenant(ctx, tenant, func(q *db.Queries) error {
+		var e error
+		rows, e = q.ListProjectsByTenant(ctx, tenant)
+		return e
+	}); err != nil {
 		return nil, status.Error(codes.Internal, "failed to list projects")
 	}
 	out := make([]*authv1.Project, 0, len(rows))
@@ -224,8 +252,13 @@ func (h *AuthHandler) ListMembers(ctx context.Context, _ *authv1.ListMembersRequ
 	if err != nil {
 		return nil, err
 	}
-	rows, err := h.q.ListMembersByTenant(ctx, tenant)
-	if err != nil {
+	// Read under RLS (iam_rls + app.tenant_id) so the DB also enforces isolation.
+	var rows []db.ListMembersByTenantRow
+	if err := h.withTenant(ctx, tenant, func(q *db.Queries) error {
+		var e error
+		rows, e = q.ListMembersByTenant(ctx, tenant)
+		return e
+	}); err != nil {
 		return nil, status.Error(codes.Internal, "failed to list members")
 	}
 	out := make([]*authv1.Member, 0, len(rows))
