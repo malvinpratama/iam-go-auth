@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/malvinpratama/iam-go-auth/internal/db"
 	authv1 "github.com/malvinpratama/iam-go-contracts/gen/auth/v1"
 	"github.com/malvinpratama/iam-go-libs/config"
 )
@@ -152,9 +153,21 @@ func (h *AuthHandler) ExchangeAuthorizationCode(ctx context.Context, req *authv1
 		return nil, status.Error(codes.Internal, "user lookup failed")
 	}
 
-	// M6: bind to the user's active tenant. (Binding to the OIDC client's tenant
-	// is refined in a later phase.)
-	tp, err := h.issueForActiveTenant(ctx, userID, email)
+	// M6.5: bind the session to the OIDC client's tenant — the client identifies
+	// the organization this app serves, so logging in through it yields a token
+	// scoped to that tenant. The user must be an active member of it.
+	var clientTenant uuid.UUID
+	if err := h.pool.QueryRow(ctx, `SELECT tenant_id FROM oauth_clients WHERE client_id = $1`, clientID).Scan(&clientTenant); err != nil {
+		return nil, status.Error(codes.Internal, "client tenant lookup failed")
+	}
+	member, err := h.q.IsActiveMember(ctx, db.IsActiveMemberParams{UserID: userID, TenantID: clientTenant})
+	if err != nil {
+		return nil, status.Error(codes.Internal, "membership check failed")
+	}
+	if !member {
+		return nil, status.Error(codes.PermissionDenied, "not a member of this organization")
+	}
+	tp, err := h.issueTokens(ctx, userID, email, clientTenant, pgtype.UUID{})
 	if err != nil {
 		return nil, err
 	}
@@ -178,6 +191,12 @@ func (h *AuthHandler) RegisterClient(ctx context.Context, req *authv1.RegisterCl
 	if err := requirePerm(ctx, "role:write"); err != nil { // defense-in-depth (gateway also gates)
 		return nil, err
 	}
+	// M6.5: the new client belongs to the caller's active tenant (the org it
+	// serves), so logins through it bind users to that tenant.
+	tenant, err := activeTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
 	clientID := uuid.NewString()
 	var secret string
 	var secretHash *string
@@ -192,10 +211,10 @@ func (h *AuthHandler) RegisterClient(ctx context.Context, req *authv1.RegisterCl
 		scopes = []string{"openid", "profile", "email"}
 	}
 	if _, err := h.pool.Exec(ctx,
-		`INSERT INTO oauth_clients (client_id, client_secret_hash, name, redirect_uris, scopes, grant_types, is_confidential)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		`INSERT INTO oauth_clients (client_id, client_secret_hash, name, redirect_uris, scopes, grant_types, is_confidential, tenant_id)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
 		clientID, secretHash, req.GetName(), req.GetRedirectUris(), scopes,
-		[]string{"authorization_code", "refresh_token"}, req.GetIsConfidential()); err != nil {
+		[]string{"authorization_code", "refresh_token"}, req.GetIsConfidential(), tenant); err != nil {
 		return nil, status.Error(codes.Internal, "could not register client")
 	}
 	return &authv1.RegisterClientResponse{ClientId: clientID, ClientSecret: secret}, nil
