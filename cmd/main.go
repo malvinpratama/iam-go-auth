@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/reflection"
 
 	auth "github.com/malvinpratama/iam-go-auth"
+	"github.com/malvinpratama/iam-go-auth/internal/cache"
 	authdb "github.com/malvinpratama/iam-go-auth/internal/db"
 	"github.com/malvinpratama/iam-go-auth/internal/email"
 	"github.com/malvinpratama/iam-go-auth/internal/handler"
@@ -86,7 +87,16 @@ func main() {
 		log.Error("load signing keys", "err", err)
 		os.Exit(1)
 	}
-	h := handler.New(pool, jwt.NewManager(keys, jwtCfg.Issuer, jwtCfg.AccessTTL), jwtCfg.RefreshTTL, email.NewLogSender(log))
+	// Optional Redis: shared access-token denylist + permission cache across
+	// replicas. Falls back to Postgres (denylist) / no cache when REDIS_URL is
+	// unset or unreachable.
+	authCache := cache.New(config.Getenv("REDIS_URL", ""))
+	if authCache.Enabled() {
+		log.Info("auth cache: redis-backed (shared denylist + permission cache)")
+	} else {
+		log.Info("auth cache: disabled (postgres denylist, no permission cache)")
+	}
+	h := handler.New(pool, jwt.NewManager(keys, jwtCfg.Issuer, jwtCfg.AccessTTL), jwtCfg.RefreshTTL, email.NewLogSender(log), authCache)
 
 	// Outbox relay: drain pending domain events to NATS JetStream. Optional —
 	// without NATS_URL the events are still recorded; the gateway's lazy profile
