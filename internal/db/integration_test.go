@@ -30,8 +30,13 @@ func newDB(t *testing.T) *db.Queries {
 		postgres.WithDatabase("auth"),
 		postgres.WithUsername("test"),
 		postgres.WithPassword("test"),
+		// Postgres briefly opens the port during init before restarting, so wait
+		// for the "ready" log to appear twice (the robust readiness signal) — a
+		// plain port check races and yields "connection reset by peer".
 		testcontainers.WithWaitStrategy(
-			wait.ForListeningPort("5432/tcp").WithStartupTimeout(60*time.Second),
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(60*time.Second),
 		),
 	)
 	if err != nil {
