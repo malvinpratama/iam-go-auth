@@ -764,6 +764,49 @@ func (q *Queries) ListRoles(ctx context.Context) ([]Role, error) {
 	return items, nil
 }
 
+const listRolesWithPermissions = `-- name: ListRolesWithPermissions :many
+SELECT r.id, r.name, r.description,
+       COALESCE(array_agg(p.name ORDER BY p.name) FILTER (WHERE p.name IS NOT NULL), '{}')::text[] AS permissions
+FROM roles r
+LEFT JOIN role_permissions rp ON rp.role_id = r.id
+LEFT JOIN permissions p ON p.id = rp.permission_id
+GROUP BY r.id, r.name, r.description
+ORDER BY r.name
+`
+
+type ListRolesWithPermissionsRow struct {
+	ID          int64
+	Name        string
+	Description string
+	Permissions []string
+}
+
+// Roles + their permission names in a single query (avoids the N+1 over roles).
+func (q *Queries) ListRolesWithPermissions(ctx context.Context) ([]ListRolesWithPermissionsRow, error) {
+	rows, err := q.db.Query(ctx, listRolesWithPermissions)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListRolesWithPermissionsRow
+	for rows.Next() {
+		var i ListRolesWithPermissionsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Description,
+			&i.Permissions,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockUser = `-- name: LockUser :exec
 UPDATE users SET locked_until = $2, failed_login_attempts = 0 WHERE id = $1
 `

@@ -178,6 +178,16 @@ SELECT id, name, description
 FROM roles
 ORDER BY name;
 
+-- name: ListRolesWithPermissions :many
+-- Roles + their permission names in a single query (avoids the N+1 over roles).
+SELECT r.id, r.name, r.description,
+       COALESCE(array_agg(p.name ORDER BY p.name) FILTER (WHERE p.name IS NOT NULL), '{}')::text[] AS permissions
+FROM roles r
+LEFT JOIN role_permissions rp ON rp.role_id = r.id
+LEFT JOIN permissions p ON p.id = rp.permission_id
+GROUP BY r.id, r.name, r.description
+ORDER BY r.name;
+
 -- name: ListRolePermissionNames :many
 SELECT p.name
 FROM role_permissions rp
