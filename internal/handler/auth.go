@@ -285,19 +285,39 @@ func (h *AuthHandler) ValidateToken(ctx context.Context, req *authv1.ValidateTok
 			return nil, status.Error(codes.Unauthenticated, "tenant membership revoked")
 		}
 	}
-	roles, err := h.q.GetUserRoles(ctx, userID)
+	// M6.3: roles/permissions are scoped to the token's tenant (+ optional
+	// project) — the same user can hold different roles in different tenants.
+	// A token without a tenant claim (legacy) falls back to the global view.
+	var roles []string
+	if claims.TenantID != "" {
+		tid, perr := uuid.Parse(claims.TenantID)
+		if perr != nil {
+			return nil, status.Error(codes.Unauthenticated, "invalid tenant")
+		}
+		proj := parseOptionalUUID(claims.ProjectID)
+		roles, err = h.q.GetUserRolesScoped(ctx, db.GetUserRolesScopedParams{UserID: userID, TenantID: tid, ProjectID: proj})
+	} else {
+		roles, err = h.q.GetUserRoles(ctx, userID)
+	}
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to load roles")
 	}
 	// Permission cache (Redis, short TTL) cuts the RBAC join off the hot path
-	// of every authenticated request; misses fall back to Postgres.
-	perms, hit := h.cache.GetPerms(ctx, claims.Subject)
+	// of every authenticated request; misses fall back to Postgres. The key is
+	// scoped to tenant/project so a tenant switch can't read stale perms.
+	perms, hit := h.cache.GetPerms(ctx, claims.TenantID, claims.ProjectID, claims.Subject)
 	if !hit {
-		perms, err = h.q.GetUserPermissions(ctx, userID)
+		if claims.TenantID != "" {
+			tid, _ := uuid.Parse(claims.TenantID)
+			proj := parseOptionalUUID(claims.ProjectID)
+			perms, err = h.q.GetUserPermissionsScoped(ctx, db.GetUserPermissionsScopedParams{UserID: userID, TenantID: tid, ProjectID: proj})
+		} else {
+			perms, err = h.q.GetUserPermissions(ctx, userID)
+		}
 		if err != nil {
 			return nil, status.Error(codes.Internal, "failed to load permissions")
 		}
-		h.cache.SetPerms(ctx, claims.Subject, perms)
+		h.cache.SetPerms(ctx, claims.TenantID, claims.ProjectID, claims.Subject, perms)
 	}
 	return &authv1.ValidateTokenResponse{
 		UserId:      claims.Subject,

@@ -62,12 +62,26 @@ func (c *Cache) IsDenied(ctx context.Context, jti string) (denied, ok bool) {
 	return n > 0, true
 }
 
-// GetPerms returns a cached permission list for a user; ok=false on miss.
-func (c *Cache) GetPerms(ctx context.Context, userID string) ([]string, bool) {
+// permsKey scopes a user's cached permissions to the active tenant/project
+// (M6.3). Permissions differ per tenant, so the cache key must too. An empty
+// project (tenant-wide token) is stored under the sentinel "-".
+func permsKey(tenant, project, userID string) string {
+	if project == "" {
+		project = "-"
+	}
+	if tenant == "" {
+		tenant = "-"
+	}
+	return "perms:" + tenant + ":" + project + ":" + userID
+}
+
+// GetPerms returns a cached permission list for a user in a tenant/project;
+// ok=false on miss.
+func (c *Cache) GetPerms(ctx context.Context, tenant, project, userID string) ([]string, bool) {
 	if c.rdb == nil {
 		return nil, false
 	}
-	v, err := c.rdb.Get(ctx, "perms:"+userID).Result()
+	v, err := c.rdb.Get(ctx, permsKey(tenant, project, userID)).Result()
 	if err != nil {
 		return nil, false
 	}
@@ -78,8 +92,8 @@ func (c *Cache) GetPerms(ctx context.Context, userID string) ([]string, bool) {
 	return perms, true
 }
 
-// SetPerms caches a user's permissions for a short TTL.
-func (c *Cache) SetPerms(ctx context.Context, userID string, perms []string) {
+// SetPerms caches a user's permissions for a tenant/project for a short TTL.
+func (c *Cache) SetPerms(ctx context.Context, tenant, project, userID string, perms []string) {
 	if c.rdb == nil {
 		return
 	}
@@ -87,13 +101,28 @@ func (c *Cache) SetPerms(ctx context.Context, userID string, perms []string) {
 	if err != nil {
 		return
 	}
-	_ = c.rdb.Set(ctx, "perms:"+userID, b, permsTTL).Err()
+	_ = c.rdb.Set(ctx, permsKey(tenant, project, userID), b, permsTTL).Err()
 }
 
-// InvalidatePerms drops a user's cached permissions (after a role change).
+// InvalidatePerms drops ALL of a user's cached permission entries across every
+// tenant/project (after a role change), via a SCAN+DEL over perms:*:*:<user>.
 func (c *Cache) InvalidatePerms(ctx context.Context, userID string) {
 	if c.rdb == nil {
 		return
 	}
-	_ = c.rdb.Del(ctx, "perms:"+userID).Err()
+	match := "perms:*:*:" + userID
+	var cursor uint64
+	for {
+		keys, next, err := c.rdb.Scan(ctx, cursor, match, 100).Result()
+		if err != nil {
+			return
+		}
+		if len(keys) > 0 {
+			_ = c.rdb.Del(ctx, keys...).Err()
+		}
+		if next == 0 {
+			break
+		}
+		cursor = next
+	}
 }
