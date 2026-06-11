@@ -1,6 +1,8 @@
-// Package saga implements the registration compensation: if the user service
-// gives up creating a profile (ProfileCreationFailed), auth rolls back the
-// half-created identity by soft-deleting it, so registration leaves no orphans.
+// Package saga handles permanently-failed profile creation. When the user
+// service gives up (ProfileCreationFailed), auth records the incident for ops
+// visibility but keeps the identity active — the profile is recreated by
+// lazy-heal on the next GET /users/me, so the user is never locked out
+// (forward recovery, not a destructive rollback).
 package saga
 
 import (
@@ -58,21 +60,18 @@ func (c *Compensator) handle(m *nats.Msg) {
 		_ = m.Term()
 		return
 	}
-	uid, err := uuid.Parse(ev.UserID)
-	if err != nil {
+	if _, err := uuid.Parse(ev.UserID); err != nil {
 		_ = m.Term()
 		return
 	}
-	// Compensate: disable the orphaned identity (recoverable, audited).
-	if err := c.q.SoftDeleteUser(context.Background(), uid); err != nil {
-		c.log.Warn("compensation soft-delete failed; will retry", "err", err)
-		_ = m.Nak()
-		return
-	}
+	// Forward recovery, not rollback: keep the identity active and record the
+	// failure for ops visibility. The profile is recreated lazily on the next
+	// GET /users/me (lazy-heal), so the user is never locked out of an account
+	// they registered.
 	_ = c.q.InsertAuditEvent(context.Background(), db.InsertAuditEventParams{
 		ActorID: "system", ActorEmail: "saga",
-		Action: "saga.profile_failed.compensated", Target: ev.UserID, Detail: ev.Reason,
+		Action: "profile.creation_failed", Target: ev.UserID, Detail: ev.Reason,
 	})
 	_ = m.Ack()
-	c.log.Warn("compensated half-created identity (soft-deleted)", "user_id", ev.UserID, "reason", ev.Reason)
+	c.log.Warn("profile creation failed permanently; identity kept active, profile will self-heal on next /users/me read", "user_id", ev.UserID, "reason", ev.Reason)
 }
