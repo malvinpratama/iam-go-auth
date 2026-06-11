@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/malvinpratama/iam-go-auth/internal/cache"
 	"github.com/malvinpratama/iam-go-auth/internal/db"
 	"github.com/malvinpratama/iam-go-auth/internal/email"
 	"github.com/malvinpratama/iam-go-auth/internal/jwt"
@@ -37,14 +39,15 @@ type AuthHandler struct {
 	refreshTTL time.Duration
 	dummyHash  string // for constant-time login on unknown users
 	mail       email.Sender
+	cache      *cache.Cache // optional Redis: token denylist + permission cache
 }
 
 // New builds an AuthHandler.
-func New(pool *pgxpool.Pool, jwtMgr *jwt.Manager, refreshTTL time.Duration, mail email.Sender) *AuthHandler {
+func New(pool *pgxpool.Pool, jwtMgr *jwt.Manager, refreshTTL time.Duration, mail email.Sender, c *cache.Cache) *AuthHandler {
 	// Precompute an argon2 hash so Login spends comparable time whether or not
 	// the user exists (mitigates user-enumeration via timing).
 	dummy, _ := password.Hash("constant-time-dummy-password")
-	return &AuthHandler{pool: pool, q: db.New(pool), jwt: jwtMgr, refreshTTL: refreshTTL, dummyHash: dummy, mail: mail}
+	return &AuthHandler{pool: pool, q: db.New(pool), jwt: jwtMgr, refreshTTL: refreshTTL, dummyHash: dummy, mail: mail, cache: c}
 }
 
 // requirePerm enforces a permission from the gateway-supplied identity metadata
@@ -220,6 +223,8 @@ func (h *AuthHandler) Logout(ctx context.Context, req *authv1.LogoutRequest) (*a
 				Jti:       claims.ID,
 				ExpiresAt: pgtype.Timestamptz{Time: claims.ExpiresAt.Time, Valid: true},
 			})
+			// Mirror into the Redis denylist so other replicas reject it at once.
+			h.cache.Deny(ctx, claims.ID, time.Until(claims.ExpiresAt.Time))
 		}
 	}
 	h.audit(ctx, "auth.logout", "", "")
@@ -237,12 +242,20 @@ func (h *AuthHandler) ValidateToken(ctx context.Context, req *authv1.ValidateTok
 		return nil, status.Error(codes.Unauthenticated, "invalid token")
 	}
 	if claims.ID != "" {
-		revoked, err := h.q.IsTokenRevoked(ctx, claims.ID)
-		if err != nil {
-			return nil, status.Error(codes.Internal, "failed to check token status")
-		}
-		if revoked {
-			return nil, status.Error(codes.Unauthenticated, "token revoked")
+		// Prefer the Redis denylist (shared across replicas); fall back to the
+		// durable Postgres denylist when Redis is off or errors.
+		if denied, ok := h.cache.IsDenied(ctx, claims.ID); ok {
+			if denied {
+				return nil, status.Error(codes.Unauthenticated, "token revoked")
+			}
+		} else {
+			revoked, err := h.q.IsTokenRevoked(ctx, claims.ID)
+			if err != nil {
+				return nil, status.Error(codes.Internal, "failed to check token status")
+			}
+			if revoked {
+				return nil, status.Error(codes.Unauthenticated, "token revoked")
+			}
 		}
 	}
 	userID, err := uuid.Parse(claims.Subject)
@@ -258,9 +271,15 @@ func (h *AuthHandler) ValidateToken(ctx context.Context, req *authv1.ValidateTok
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to load roles")
 	}
-	perms, err := h.q.GetUserPermissions(ctx, userID)
-	if err != nil {
-		return nil, status.Error(codes.Internal, "failed to load permissions")
+	// Permission cache (Redis, short TTL) cuts the RBAC join off the hot path
+	// of every authenticated request; misses fall back to Postgres.
+	perms, hit := h.cache.GetPerms(ctx, claims.Subject)
+	if !hit {
+		perms, err = h.q.GetUserPermissions(ctx, userID)
+		if err != nil {
+			return nil, status.Error(codes.Internal, "failed to load permissions")
+		}
+		h.cache.SetPerms(ctx, claims.Subject, perms)
 	}
 	return &authv1.ValidateTokenResponse{
 		UserId:      claims.Subject,
@@ -401,8 +420,38 @@ func (h *AuthHandler) AssignRole(ctx context.Context, req *authv1.AssignRoleRequ
 	if err := h.q.AssignRoleToUser(ctx, db.AssignRoleToUserParams{UserID: userID, Name: req.GetRoleName()}); err != nil {
 		return nil, status.Error(codes.Internal, "failed to assign role")
 	}
+	h.cache.InvalidatePerms(ctx, req.GetUserId())
 	h.audit(ctx, "role.assign", req.GetUserId(), req.GetRoleName())
 	return &authv1.AssignRoleResponse{Success: true}, nil
+}
+
+// AssignRoleBulk assigns one role to many users; returns the count assigned and
+// the user_ids that failed (invalid id or assignment error). Partial success is
+// allowed — valid users still get the role even if some ids are bad.
+func (h *AuthHandler) AssignRoleBulk(ctx context.Context, req *authv1.AssignRoleBulkRequest) (*authv1.AssignRoleBulkResponse, error) {
+	if err := requirePerm(ctx, "role:assign"); err != nil {
+		return nil, err
+	}
+	if _, err := h.q.GetRoleByName(ctx, req.GetRoleName()); err != nil {
+		return nil, status.Error(codes.NotFound, "role not found")
+	}
+	var assigned int32
+	var failed []string
+	for _, uid := range req.GetUserIds() {
+		userID, err := uuid.Parse(uid)
+		if err != nil {
+			failed = append(failed, uid)
+			continue
+		}
+		if err := h.q.AssignRoleToUser(ctx, db.AssignRoleToUserParams{UserID: userID, Name: req.GetRoleName()}); err != nil {
+			failed = append(failed, uid)
+			continue
+		}
+		h.cache.InvalidatePerms(ctx, uid)
+		assigned++
+	}
+	h.audit(ctx, "role.assign_bulk", req.GetRoleName(), fmt.Sprintf("%d assigned, %d failed", assigned, len(failed)))
+	return &authv1.AssignRoleBulkResponse{Assigned: assigned, Failed: failed}, nil
 }
 
 func (h *AuthHandler) RevokeRole(ctx context.Context, req *authv1.RevokeRoleRequest) (*authv1.RevokeRoleResponse, error) {
@@ -419,6 +468,7 @@ func (h *AuthHandler) RevokeRole(ctx context.Context, req *authv1.RevokeRoleRequ
 	if err := h.q.RevokeRoleFromUser(ctx, db.RevokeRoleFromUserParams{UserID: userID, Name: req.GetRoleName()}); err != nil {
 		return nil, status.Error(codes.Internal, "failed to revoke role")
 	}
+	h.cache.InvalidatePerms(ctx, req.GetUserId())
 	h.audit(ctx, "role.revoke", req.GetUserId(), req.GetRoleName())
 	return &authv1.RevokeRoleResponse{Success: true}, nil
 }
