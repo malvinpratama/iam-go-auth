@@ -413,10 +413,18 @@ func (h *AuthHandler) CreateRole(ctx context.Context, req *authv1.CreateRoleRequ
 	if err := requirePerm(ctx, "role:write"); err != nil {
 		return nil, err
 	}
+	tenant, err := activeTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if req.GetName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "role name is required")
 	}
-	role, err := h.q.CreateRole(ctx, db.CreateRoleParams{Name: req.GetName(), Description: req.GetDescription()})
+	if isBuiltinRole(req.GetName()) {
+		return nil, status.Error(codes.FailedPrecondition, "name reserved for a built-in role")
+	}
+	// Custom roles belong to the active tenant (never a NULL-tenant template).
+	role, err := h.q.CreateRole(ctx, db.CreateRoleParams{Name: req.GetName(), Description: req.GetDescription(), TenantID: pgTenant(tenant)})
 	if err != nil {
 		return nil, status.Error(codes.AlreadyExists, "role already exists")
 	}
@@ -428,9 +436,16 @@ func (h *AuthHandler) UpdateRole(ctx context.Context, req *authv1.UpdateRoleRequ
 	if err := requirePerm(ctx, "role:write"); err != nil {
 		return nil, err
 	}
-	role, err := h.q.UpdateRole(ctx, db.UpdateRoleParams{Name: req.GetName(), Description: req.GetDescription()})
+	tenant, err := activeTenant(ctx)
 	if err != nil {
-		return nil, status.Error(codes.NotFound, "role not found")
+		return nil, err
+	}
+	if isBuiltinRole(req.GetName()) {
+		return nil, status.Error(codes.FailedPrecondition, "cannot modify a built-in role")
+	}
+	role, err := h.q.UpdateRole(ctx, db.UpdateRoleParams{Name: req.GetName(), Description: req.GetDescription(), TenantID: pgTenant(tenant)})
+	if err != nil {
+		return nil, status.Error(codes.NotFound, "role not found in this tenant")
 	}
 	return &authv1.Role{Id: role.ID, Name: role.Name, Description: role.Description}, nil
 }
@@ -439,13 +454,17 @@ func (h *AuthHandler) DeleteRole(ctx context.Context, req *authv1.DeleteRoleRequ
 	if err := requirePerm(ctx, "role:write"); err != nil {
 		return nil, err
 	}
+	tenant, err := activeTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if isBuiltinRole(req.GetName()) {
-		return nil, status.Error(codes.FailedPrecondition, "cannot delete built-in role")
+		return nil, status.Error(codes.FailedPrecondition, "cannot delete a built-in role")
 	}
-	if _, err := h.q.GetRoleByName(ctx, req.GetName()); err != nil {
-		return nil, status.Error(codes.NotFound, "role not found")
+	if _, err := h.q.GetTenantRole(ctx, db.GetTenantRoleParams{Name: req.GetName(), TenantID: pgTenant(tenant)}); err != nil {
+		return nil, status.Error(codes.NotFound, "role not found in this tenant")
 	}
-	if err := h.q.DeleteRole(ctx, req.GetName()); err != nil {
+	if err := h.q.DeleteRole(ctx, db.DeleteRoleParams{Name: req.GetName(), TenantID: pgTenant(tenant)}); err != nil {
 		return nil, status.Error(codes.Internal, "failed to delete role")
 	}
 	h.audit(ctx, "role.delete", req.GetName(), "")
@@ -453,8 +472,15 @@ func (h *AuthHandler) DeleteRole(ctx context.Context, req *authv1.DeleteRoleRequ
 }
 
 func (h *AuthHandler) ListRoles(ctx context.Context, _ *authv1.ListRolesRequest) (*authv1.ListRolesResponse, error) {
-	// Single query (roles LEFT JOIN their permissions, aggregated) — no N+1.
-	roles, err := h.q.ListRolesWithPermissions(ctx)
+	if err := requirePerm(ctx, "role:read"); err != nil {
+		return nil, err
+	}
+	tenant, err := activeTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// The tenant's own roles + shared built-in templates, aggregated — no N+1.
+	roles, err := h.q.ListRolesWithPermissions(ctx, pgTenant(tenant))
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to list roles")
 	}
@@ -477,8 +503,8 @@ func (h *AuthHandler) AssignRole(ctx context.Context, req *authv1.AssignRoleRequ
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid user id")
 	}
-	if _, err := h.q.GetRoleByName(ctx, req.GetRoleName()); err != nil {
-		return nil, status.Error(codes.NotFound, "role not found")
+	if err := h.validateAssign(ctx, req.GetRoleName(), req.GetProjectId(), tenant); err != nil {
+		return nil, err
 	}
 	if err := h.q.AssignRoleToUser(ctx, db.AssignRoleToUserParams{UserID: userID, Name: req.GetRoleName(), TenantID: tenant, ProjectID: parseOptionalUUID(req.GetProjectId())}); err != nil {
 		return nil, status.Error(codes.Internal, "failed to assign role")
@@ -500,8 +526,8 @@ func (h *AuthHandler) AssignRoleBulk(ctx context.Context, req *authv1.AssignRole
 		return nil, err
 	}
 	bulkProject := parseOptionalUUID(req.GetProjectId())
-	if _, err := h.q.GetRoleByName(ctx, req.GetRoleName()); err != nil {
-		return nil, status.Error(codes.NotFound, "role not found")
+	if err := h.validateAssign(ctx, req.GetRoleName(), req.GetProjectId(), tenant); err != nil {
+		return nil, err
 	}
 	var assigned int32
 	var failed []string
@@ -546,6 +572,9 @@ func (h *AuthHandler) RevokeRole(ctx context.Context, req *authv1.RevokeRoleRequ
 }
 
 func (h *AuthHandler) ListPermissions(ctx context.Context, _ *authv1.ListPermissionsRequest) (*authv1.ListPermissionsResponse, error) {
+	if err := requirePerm(ctx, "role:read"); err != nil {
+		return nil, err
+	}
 	perms, err := h.q.ListPermissions(ctx)
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to list permissions")
@@ -557,12 +586,31 @@ func (h *AuthHandler) ListPermissions(ctx context.Context, _ *authv1.ListPermiss
 	return &authv1.ListPermissionsResponse{Permissions: out}, nil
 }
 
+// permRoleGuard validates a permission grant/revoke target: must be one of the
+// tenant's OWN roles (built-in templates are platform-managed, shared across
+// tenants, and must not be mutable from a tenant context).
+func (h *AuthHandler) permRoleGuard(ctx context.Context, roleName string, tenant uuid.UUID) error {
+	if isBuiltinRole(roleName) {
+		return status.Error(codes.FailedPrecondition, "cannot modify a built-in role's permissions")
+	}
+	if _, err := h.q.GetTenantRole(ctx, db.GetTenantRoleParams{Name: roleName, TenantID: pgTenant(tenant)}); err != nil {
+		return status.Error(codes.NotFound, "role not found in this tenant")
+	}
+	return nil
+}
+
 func (h *AuthHandler) GrantPermission(ctx context.Context, req *authv1.GrantPermissionRequest) (*authv1.GrantPermissionResponse, error) {
 	if err := requirePerm(ctx, "role:write"); err != nil {
 		return nil, err
 	}
-	err := h.q.GrantPermissionToRole(ctx, db.GrantPermissionToRoleParams{Name: req.GetRoleName(), Name_2: req.GetPermissionName()})
+	tenant, err := activeTenant(ctx)
 	if err != nil {
+		return nil, err
+	}
+	if err := h.permRoleGuard(ctx, req.GetRoleName(), tenant); err != nil {
+		return nil, err
+	}
+	if err := h.q.GrantPermissionToRole(ctx, db.GrantPermissionToRoleParams{Name: req.GetRoleName(), Name_2: req.GetPermissionName(), TenantID: pgTenant(tenant)}); err != nil {
 		return nil, status.Error(codes.Internal, "failed to grant permission")
 	}
 	h.audit(ctx, "permission.grant", req.GetRoleName(), req.GetPermissionName())
@@ -573,8 +621,14 @@ func (h *AuthHandler) RevokePermission(ctx context.Context, req *authv1.RevokePe
 	if err := requirePerm(ctx, "role:write"); err != nil {
 		return nil, err
 	}
-	err := h.q.RevokePermissionFromRole(ctx, db.RevokePermissionFromRoleParams{Name: req.GetRoleName(), Name_2: req.GetPermissionName()})
+	tenant, err := activeTenant(ctx)
 	if err != nil {
+		return nil, err
+	}
+	if err := h.permRoleGuard(ctx, req.GetRoleName(), tenant); err != nil {
+		return nil, err
+	}
+	if err := h.q.RevokePermissionFromRole(ctx, db.RevokePermissionFromRoleParams{Name: req.GetRoleName(), Name_2: req.GetPermissionName(), TenantID: pgTenant(tenant)}); err != nil {
 		return nil, status.Error(codes.Internal, "failed to revoke permission")
 	}
 	h.audit(ctx, "permission.revoke", req.GetRoleName(), req.GetPermissionName())
