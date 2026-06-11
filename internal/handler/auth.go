@@ -391,17 +391,14 @@ func (h *AuthHandler) DeleteRole(ctx context.Context, req *authv1.DeleteRoleRequ
 }
 
 func (h *AuthHandler) ListRoles(ctx context.Context, _ *authv1.ListRolesRequest) (*authv1.ListRolesResponse, error) {
-	roles, err := h.q.ListRoles(ctx)
+	// Single query (roles LEFT JOIN their permissions, aggregated) — no N+1.
+	roles, err := h.q.ListRolesWithPermissions(ctx)
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to list roles")
 	}
 	out := make([]*authv1.Role, 0, len(roles))
 	for _, r := range roles {
-		perms, err := h.q.ListRolePermissionNames(ctx, r.ID)
-		if err != nil {
-			return nil, status.Error(codes.Internal, "failed to list role permissions")
-		}
-		out = append(out, &authv1.Role{Id: r.ID, Name: r.Name, Description: r.Description, Permissions: perms})
+		out = append(out, &authv1.Role{Id: r.ID, Name: r.Name, Description: r.Description, Permissions: r.Permissions})
 	}
 	return &authv1.ListRolesResponse{Roles: out}, nil
 }
