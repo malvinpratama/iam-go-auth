@@ -97,7 +97,7 @@ func (h *AuthHandler) Register(ctx context.Context, req *authv1.RegisterRequest)
 	if err != nil {
 		return nil, status.Error(codes.AlreadyExists, "email already registered")
 	}
-	if err := qtx.AssignRoleToUser(ctx, db.AssignRoleToUserParams{UserID: user.ID, Name: defaultRole}); err != nil {
+	if err := qtx.AssignRoleToUser(ctx, db.AssignRoleToUserParams{UserID: user.ID, Name: defaultRole, TenantID: defaultTenantUUID}); err != nil {
 		return nil, status.Error(codes.Internal, "failed to assign default role")
 	}
 	// M6: every new identity joins the default tenant so it can log in. (Tenant-
@@ -469,6 +469,10 @@ func (h *AuthHandler) AssignRole(ctx context.Context, req *authv1.AssignRoleRequ
 	if err := requirePerm(ctx, "role:assign"); err != nil {
 		return nil, err
 	}
+	tenant, err := activeTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
 	userID, err := uuid.Parse(req.GetUserId())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid user id")
@@ -476,7 +480,7 @@ func (h *AuthHandler) AssignRole(ctx context.Context, req *authv1.AssignRoleRequ
 	if _, err := h.q.GetRoleByName(ctx, req.GetRoleName()); err != nil {
 		return nil, status.Error(codes.NotFound, "role not found")
 	}
-	if err := h.q.AssignRoleToUser(ctx, db.AssignRoleToUserParams{UserID: userID, Name: req.GetRoleName()}); err != nil {
+	if err := h.q.AssignRoleToUser(ctx, db.AssignRoleToUserParams{UserID: userID, Name: req.GetRoleName(), TenantID: tenant, ProjectID: parseOptionalUUID(req.GetProjectId())}); err != nil {
 		return nil, status.Error(codes.Internal, "failed to assign role")
 	}
 	h.cache.InvalidatePerms(ctx, req.GetUserId())
@@ -491,6 +495,11 @@ func (h *AuthHandler) AssignRoleBulk(ctx context.Context, req *authv1.AssignRole
 	if err := requirePerm(ctx, "role:assign"); err != nil {
 		return nil, err
 	}
+	tenant, err := activeTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	bulkProject := parseOptionalUUID(req.GetProjectId())
 	if _, err := h.q.GetRoleByName(ctx, req.GetRoleName()); err != nil {
 		return nil, status.Error(codes.NotFound, "role not found")
 	}
@@ -502,7 +511,7 @@ func (h *AuthHandler) AssignRoleBulk(ctx context.Context, req *authv1.AssignRole
 			failed = append(failed, uid)
 			continue
 		}
-		if err := h.q.AssignRoleToUser(ctx, db.AssignRoleToUserParams{UserID: userID, Name: req.GetRoleName()}); err != nil {
+		if err := h.q.AssignRoleToUser(ctx, db.AssignRoleToUserParams{UserID: userID, Name: req.GetRoleName(), TenantID: tenant, ProjectID: bulkProject}); err != nil {
 			failed = append(failed, uid)
 			continue
 		}
@@ -517,6 +526,10 @@ func (h *AuthHandler) RevokeRole(ctx context.Context, req *authv1.RevokeRoleRequ
 	if err := requirePerm(ctx, "role:assign"); err != nil {
 		return nil, err
 	}
+	tenant, err := activeTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
 	userID, err := uuid.Parse(req.GetUserId())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid user id")
@@ -524,7 +537,7 @@ func (h *AuthHandler) RevokeRole(ctx context.Context, req *authv1.RevokeRoleRequ
 	if _, err := h.q.GetRoleByName(ctx, req.GetRoleName()); err != nil {
 		return nil, status.Error(codes.NotFound, "role not found")
 	}
-	if err := h.q.RevokeRoleFromUser(ctx, db.RevokeRoleFromUserParams{UserID: userID, Name: req.GetRoleName()}); err != nil {
+	if err := h.q.RevokeRoleFromUser(ctx, db.RevokeRoleFromUserParams{UserID: userID, Name: req.GetRoleName(), TenantID: tenant, ProjectID: parseOptionalUUID(req.GetProjectId())}); err != nil {
 		return nil, status.Error(codes.Internal, "failed to revoke role")
 	}
 	h.cache.InvalidatePerms(ctx, req.GetUserId())
