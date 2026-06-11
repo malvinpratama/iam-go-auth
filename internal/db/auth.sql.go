@@ -115,6 +115,23 @@ func (q *Queries) CreateEmailVerification(ctx context.Context, arg CreateEmailVe
 	return err
 }
 
+const createMembership = `-- name: CreateMembership :exec
+
+INSERT INTO memberships (user_id, tenant_id) VALUES ($1, $2)
+ON CONFLICT (user_id, tenant_id) DO NOTHING
+`
+
+type CreateMembershipParams struct {
+	UserID   uuid.UUID
+	TenantID uuid.UUID
+}
+
+// ── Multi-tenant (M6) ───────────────────────────────────────
+func (q *Queries) CreateMembership(ctx context.Context, arg CreateMembershipParams) error {
+	_, err := q.db.Exec(ctx, createMembership, arg.UserID, arg.TenantID)
+	return err
+}
+
 const createPasswordReset = `-- name: CreatePasswordReset :exec
 INSERT INTO password_resets (token_hash, user_id, expires_at) VALUES ($1, $2, $3)
 `
@@ -131,8 +148,8 @@ func (q *Queries) CreatePasswordReset(ctx context.Context, arg CreatePasswordRes
 }
 
 const createRefreshToken = `-- name: CreateRefreshToken :one
-INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
-VALUES ($1, $2, $3)
+INSERT INTO refresh_tokens (user_id, token_hash, expires_at, tenant_id, project_id)
+VALUES ($1, $2, $3, $4, $5)
 RETURNING id, user_id, token_hash, expires_at, created_at
 `
 
@@ -140,6 +157,8 @@ type CreateRefreshTokenParams struct {
 	UserID    uuid.UUID
 	TokenHash string
 	ExpiresAt pgtype.Timestamptz
+	TenantID  uuid.UUID
+	ProjectID pgtype.UUID
 }
 
 type CreateRefreshTokenRow struct {
@@ -151,7 +170,13 @@ type CreateRefreshTokenRow struct {
 }
 
 func (q *Queries) CreateRefreshToken(ctx context.Context, arg CreateRefreshTokenParams) (CreateRefreshTokenRow, error) {
-	row := q.db.QueryRow(ctx, createRefreshToken, arg.UserID, arg.TokenHash, arg.ExpiresAt)
+	row := q.db.QueryRow(ctx, createRefreshToken,
+		arg.UserID,
+		arg.TokenHash,
+		arg.ExpiresAt,
+		arg.TenantID,
+		arg.ProjectID,
+	)
 	var i CreateRefreshTokenRow
 	err := row.Scan(
 		&i.ID,
@@ -331,8 +356,19 @@ func (q *Queries) GetApiKeyByHash(ctx context.Context, keyHash string) (GetApiKe
 	return i, err
 }
 
+const getDefaultProject = `-- name: GetDefaultProject :one
+SELECT id FROM projects WHERE tenant_id = $1 AND slug = 'default' LIMIT 1
+`
+
+func (q *Queries) GetDefaultProject(ctx context.Context, tenantID uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, getDefaultProject, tenantID)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
 const getRefreshToken = `-- name: GetRefreshToken :one
-SELECT id, user_id, token_hash, expires_at, revoked_at, created_at
+SELECT id, user_id, token_hash, expires_at, revoked_at, tenant_id, project_id, created_at
 FROM refresh_tokens
 WHERE token_hash = $1
 `
@@ -343,6 +379,8 @@ type GetRefreshTokenRow struct {
 	TokenHash string
 	ExpiresAt pgtype.Timestamptz
 	RevokedAt pgtype.Timestamptz
+	TenantID  uuid.UUID
+	ProjectID pgtype.UUID
 	CreatedAt pgtype.Timestamptz
 }
 
@@ -355,6 +393,8 @@ func (q *Queries) GetRefreshToken(ctx context.Context, tokenHash string) (GetRef
 		&i.TokenHash,
 		&i.ExpiresAt,
 		&i.RevokedAt,
+		&i.TenantID,
+		&i.ProjectID,
 		&i.CreatedAt,
 	)
 	return i, err
@@ -605,6 +645,24 @@ func (q *Queries) InsertRecoveryCode(ctx context.Context, arg InsertRecoveryCode
 	return err
 }
 
+const isActiveMember = `-- name: IsActiveMember :one
+SELECT EXISTS (
+  SELECT 1 FROM memberships WHERE user_id = $1 AND tenant_id = $2 AND status = 'active'
+)::boolean
+`
+
+type IsActiveMemberParams struct {
+	UserID   uuid.UUID
+	TenantID uuid.UUID
+}
+
+func (q *Queries) IsActiveMember(ctx context.Context, arg IsActiveMemberParams) (bool, error) {
+	row := q.db.QueryRow(ctx, isActiveMember, arg.UserID, arg.TenantID)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const isTokenRevoked = `-- name: IsTokenRevoked :one
 SELECT EXISTS(SELECT 1 FROM revoked_tokens WHERE jti = $1)
 `
@@ -704,6 +762,46 @@ func (q *Queries) ListAuditEvents(ctx context.Context, limit int32) ([]ListAudit
 			&i.Target,
 			&i.Detail,
 			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMembershipsByUser = `-- name: ListMembershipsByUser :many
+SELECT m.tenant_id, t.slug AS tenant_slug, t.name AS tenant_name, m.status
+FROM memberships m
+JOIN tenants t ON t.id = m.tenant_id
+WHERE m.user_id = $1 AND m.status = 'active'
+ORDER BY t.name
+`
+
+type ListMembershipsByUserRow struct {
+	TenantID   uuid.UUID
+	TenantSlug string
+	TenantName string
+	Status     string
+}
+
+func (q *Queries) ListMembershipsByUser(ctx context.Context, userID uuid.UUID) ([]ListMembershipsByUserRow, error) {
+	rows, err := q.db.Query(ctx, listMembershipsByUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListMembershipsByUserRow
+	for rows.Next() {
+		var i ListMembershipsByUserRow
+		if err := rows.Scan(
+			&i.TenantID,
+			&i.TenantSlug,
+			&i.TenantName,
+			&i.Status,
 		); err != nil {
 			return nil, err
 		}

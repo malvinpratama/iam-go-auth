@@ -19,6 +19,10 @@ type Claims struct {
 	// "mfa" for the short-lived token issued between the password step and the
 	// TOTP step of a 2FA login (it must NOT be accepted as an access token).
 	Purpose string `json:"purpose,omitempty"`
+	// M6: the tenant/project the access token is bound to (empty project =
+	// tenant-wide). Carried so the gateway can scope every request.
+	TenantID  string `json:"tenant_id,omitempty"`
+	ProjectID string `json:"project_id,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -46,11 +50,14 @@ func (m *Manager) AccessTTL() time.Duration { return m.accessTTL }
 // PublicKeys returns kid -> public key for building a JWKS document.
 func (m *Manager) PublicKeys() map[string]*rsa.PublicKey { return m.verifiers }
 
-// Issue creates a signed access token for the given user.
-func (m *Manager) Issue(userID, email string) (string, error) {
+// Issue creates a signed access token for the given user, bound to a tenant
+// (and optionally a project; empty projectID = tenant-wide).
+func (m *Manager) Issue(userID, email, tenantID, projectID string) (string, error) {
 	now := time.Now()
 	claims := Claims{
-		Email: email,
+		Email:     email,
+		TenantID:  tenantID,
+		ProjectID: projectID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID:        uuid.NewString(), // jti — used for access-token revocation
 			Subject:   userID,

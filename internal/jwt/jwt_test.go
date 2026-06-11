@@ -20,7 +20,7 @@ func newTestManager(ttl time.Duration) *Manager {
 
 func TestIssueAndParse(t *testing.T) {
 	m := newTestManager(time.Minute)
-	tok, err := m.Issue("user-123", "a@b.com")
+	tok, err := m.Issue("user-123", "a@b.com", "", "")
 	if err != nil {
 		t.Fatalf("issue: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestIssueAndParse(t *testing.T) {
 
 func TestParseRejectsTampered(t *testing.T) {
 	m := newTestManager(time.Minute)
-	tok, _ := m.Issue("user-123", "a@b.com")
+	tok, _ := m.Issue("user-123", "a@b.com", "", "")
 	if _, err := m.Parse(tok + "x"); err == nil {
 		t.Error("expected error for tampered token")
 	}
@@ -46,7 +46,7 @@ func TestParseRejectsTampered(t *testing.T) {
 
 func TestParseRejectsExpired(t *testing.T) {
 	m := newTestManager(-time.Minute)
-	tok, _ := m.Issue("user-123", "a@b.com")
+	tok, _ := m.Issue("user-123", "a@b.com", "", "")
 	if _, err := m.Parse(tok); err == nil {
 		t.Error("expected error for expired token")
 	}
@@ -54,7 +54,7 @@ func TestParseRejectsExpired(t *testing.T) {
 
 func TestParseRejectsUnknownKid(t *testing.T) {
 	m := newTestManager(time.Minute)
-	tok, _ := m.Issue("user-123", "a@b.com")
+	tok, _ := m.Issue("user-123", "a@b.com", "", "")
 	// A manager with a different key set must reject a token signed elsewhere.
 	other := newTestManager(time.Minute)
 	if _, err := other.Parse(tok); err == nil {

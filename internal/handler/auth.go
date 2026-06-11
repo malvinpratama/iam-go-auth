@@ -100,6 +100,11 @@ func (h *AuthHandler) Register(ctx context.Context, req *authv1.RegisterRequest)
 	if err := qtx.AssignRoleToUser(ctx, db.AssignRoleToUserParams{UserID: user.ID, Name: defaultRole}); err != nil {
 		return nil, status.Error(codes.Internal, "failed to assign default role")
 	}
+	// M6: every new identity joins the default tenant so it can log in. (Tenant-
+	// scoped registration / invites refine this in a later phase.)
+	if err := qtx.CreateMembership(ctx, db.CreateMembershipParams{UserID: user.ID, TenantID: defaultTenantUUID}); err != nil {
+		return nil, status.Error(codes.Internal, "failed to create membership")
+	}
 	// Enqueue a UserRegistered event in the SAME transaction (outbox pattern).
 	// The user service creates the matching profile asynchronously; nothing
 	// here calls the user service directly.
@@ -176,7 +181,7 @@ func (h *AuthHandler) Login(ctx context.Context, req *authv1.LoginRequest) (*aut
 	}
 
 	h.auditAs(ctx, user.ID.String(), user.Email, "login.success", "", "")
-	return h.issueTokens(ctx, user.ID, user.Email)
+	return h.issueForActiveTenant(ctx, user.ID, user.Email)
 }
 
 // mfaTokenTTL bounds how long the password step stays valid while the user
@@ -204,11 +209,12 @@ func (h *AuthHandler) Refresh(ctx context.Context, req *authv1.RefreshRequest) (
 	if err != nil {
 		return nil, status.Error(codes.Unauthenticated, "user not found")
 	}
-	// Rotate: revoke the presented token, then issue a fresh pair.
+	// Rotate: revoke the presented token, then issue a fresh pair bound to the
+	// same tenant/project the session was on.
 	if err := h.q.RevokeRefreshToken(ctx, hash); err != nil {
 		return nil, status.Error(codes.Internal, "failed to rotate token")
 	}
-	return h.issueTokens(ctx, user.ID, user.Email)
+	return h.issueTokens(ctx, user.ID, user.Email, row.TenantID, row.ProjectID)
 }
 
 // Logout revokes the refresh token and denylists the access token (by jti).
@@ -267,6 +273,18 @@ func (h *AuthHandler) ValidateToken(ctx context.Context, req *authv1.ValidateTok
 	if err != nil || !active {
 		return nil, status.Error(codes.Unauthenticated, "account is not active")
 	}
+	// M6: the token is bound to a tenant — verify the user is still an active
+	// member (so removing a membership invalidates their tokens for it).
+	if claims.TenantID != "" {
+		tid, perr := uuid.Parse(claims.TenantID)
+		if perr != nil {
+			return nil, status.Error(codes.Unauthenticated, "invalid tenant")
+		}
+		member, merr := h.q.IsActiveMember(ctx, db.IsActiveMemberParams{UserID: userID, TenantID: tid})
+		if merr != nil || !member {
+			return nil, status.Error(codes.Unauthenticated, "tenant membership revoked")
+		}
+	}
 	roles, err := h.q.GetUserRoles(ctx, userID)
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to load roles")
@@ -286,6 +304,8 @@ func (h *AuthHandler) ValidateToken(ctx context.Context, req *authv1.ValidateTok
 		Email:       claims.Email,
 		Roles:       roles,
 		Permissions: perms,
+		TenantId:    claims.TenantID,
+		ProjectId:   claims.ProjectID,
 	}, nil
 }
 
@@ -622,8 +642,19 @@ func isBuiltinRole(name string) bool {
 
 // ── helpers ─────────────────────────────────────────────────
 
-func (h *AuthHandler) issueTokens(ctx context.Context, userID uuid.UUID, email string) (*authv1.TokenPair, error) {
-	access, err := h.jwt.Issue(userID.String(), email)
+// defaultTenantID matches the seed in migration 000010 (shared across stacks).
+const defaultTenantID = "00000000-0000-0000-0000-000000000001"
+
+var defaultTenantUUID = uuid.MustParse(defaultTenantID)
+
+// issueTokens signs an access token bound to (tenant, project) and persists a
+// refresh token carrying the same binding (so refresh re-issues for it).
+func (h *AuthHandler) issueTokens(ctx context.Context, userID uuid.UUID, email string, tenantID uuid.UUID, projectID pgtype.UUID) (*authv1.TokenPair, error) {
+	projStr := ""
+	if projectID.Valid {
+		projStr = uuid.UUID(projectID.Bytes).String()
+	}
+	access, err := h.jwt.Issue(userID.String(), email, tenantID.String(), projStr)
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to sign token")
 	}
@@ -634,6 +665,7 @@ func (h *AuthHandler) issueTokens(ctx context.Context, userID uuid.UUID, email s
 	expires := pgtype.Timestamptz{Time: time.Now().Add(h.refreshTTL), Valid: true}
 	if _, err := h.q.CreateRefreshToken(ctx, db.CreateRefreshTokenParams{
 		UserID: userID, TokenHash: hashToken(refresh), ExpiresAt: expires,
+		TenantID: tenantID, ProjectID: projectID,
 	}); err != nil {
 		return nil, status.Error(codes.Internal, "failed to persist refresh token")
 	}
@@ -643,6 +675,19 @@ func (h *AuthHandler) issueTokens(ctx context.Context, userID uuid.UUID, email s
 		ExpiresIn:    int64(h.jwt.AccessTTL().Seconds()),
 		TokenType:    "Bearer",
 	}, nil
+}
+
+// issueForActiveTenant picks the user's first active membership (tenant-wide,
+// no project) and issues a token bound to it.
+func (h *AuthHandler) issueForActiveTenant(ctx context.Context, userID uuid.UUID, email string) (*authv1.TokenPair, error) {
+	members, err := h.q.ListMembershipsByUser(ctx, userID)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "failed to load memberships")
+	}
+	if len(members) == 0 {
+		return nil, status.Error(codes.PermissionDenied, "user has no tenant membership")
+	}
+	return h.issueTokens(ctx, userID, email, members[0].TenantID, pgtype.UUID{})
 }
 
 func newRefreshToken() (string, error) {

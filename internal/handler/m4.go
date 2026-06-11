@@ -153,7 +153,7 @@ func (h *AuthHandler) LoginTotp(ctx context.Context, req *authv1.LoginTotpReques
 		return nil, status.Error(codes.Unauthenticated, "invalid code")
 	}
 	h.auditAs(ctx, uid.String(), user.Email, "login.success", "", "2fa")
-	return h.issueTokens(ctx, uid, user.Email)
+	return h.issueForActiveTenant(ctx, uid, user.Email)
 }
 
 // consumeRecoveryCode atomically spends a one-time recovery code; true on success.
