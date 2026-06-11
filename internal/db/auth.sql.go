@@ -32,18 +32,27 @@ func (q *Queries) AssignRoleInTenant(ctx context.Context, arg AssignRoleInTenant
 }
 
 const assignRoleToUser = `-- name: AssignRoleToUser :exec
-INSERT INTO user_roles (user_id, role_id)
-SELECT $1, r.id FROM roles r WHERE r.name = $2
+INSERT INTO user_roles (user_id, role_id, tenant_id, project_id)
+SELECT $1, r.id, $3, $4 FROM roles r WHERE r.name = $2
 ON CONFLICT DO NOTHING
 `
 
 type AssignRoleToUserParams struct {
-	UserID uuid.UUID
-	Name   string
+	UserID    uuid.UUID
+	Name      string
+	TenantID  uuid.UUID
+	ProjectID pgtype.UUID
 }
 
+// M6: role assignment is scoped to the active tenant + an optional project
+// ($4 NULL = tenant-wide, applies to every project in the tenant).
 func (q *Queries) AssignRoleToUser(ctx context.Context, arg AssignRoleToUserParams) error {
-	_, err := q.db.Exec(ctx, assignRoleToUser, arg.UserID, arg.Name)
+	_, err := q.db.Exec(ctx, assignRoleToUser,
+		arg.UserID,
+		arg.Name,
+		arg.TenantID,
+		arg.ProjectID,
+	)
 	return err
 }
 
@@ -645,6 +654,47 @@ func (q *Queries) GetUserPermissionsScoped(ctx context.Context, arg GetUserPermi
 			return nil, err
 		}
 		items = append(items, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getUserRoleAssignments = `-- name: GetUserRoleAssignments :many
+SELECT r.name AS role, ur.project_id, p.slug AS project_slug
+FROM user_roles ur
+JOIN roles r ON r.id = ur.role_id
+LEFT JOIN projects p ON p.id = ur.project_id
+WHERE ur.user_id = $1 AND ur.tenant_id = $2
+ORDER BY r.name, p.slug NULLS FIRST
+`
+
+type GetUserRoleAssignmentsParams struct {
+	UserID   uuid.UUID
+	TenantID uuid.UUID
+}
+
+type GetUserRoleAssignmentsRow struct {
+	Role        string
+	ProjectID   pgtype.UUID
+	ProjectSlug *string
+}
+
+// M6: a user's role assignments in a tenant, each with its project scope.
+func (q *Queries) GetUserRoleAssignments(ctx context.Context, arg GetUserRoleAssignmentsParams) ([]GetUserRoleAssignmentsRow, error) {
+	rows, err := q.db.Query(ctx, getUserRoleAssignments, arg.UserID, arg.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GetUserRoleAssignmentsRow
+	for rows.Next() {
+		var i GetUserRoleAssignmentsRow
+		if err := rows.Scan(&i.Role, &i.ProjectID, &i.ProjectSlug); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -1338,18 +1388,28 @@ func (q *Queries) RevokeRefreshToken(ctx context.Context, tokenHash string) erro
 }
 
 const revokeRoleFromUser = `-- name: RevokeRoleFromUser :exec
-DELETE FROM user_roles
-WHERE user_id = $1
-  AND role_id = (SELECT id FROM roles WHERE name = $2)
+DELETE FROM user_roles ur
+WHERE ur.user_id = $1
+  AND ur.role_id = (SELECT r.id FROM roles r WHERE r.name = $2)
+  AND ur.tenant_id = $3
+  AND ur.project_id IS NOT DISTINCT FROM $4
 `
 
 type RevokeRoleFromUserParams struct {
-	UserID uuid.UUID
-	Name   string
+	UserID    uuid.UUID
+	Name      string
+	TenantID  uuid.UUID
+	ProjectID pgtype.UUID
 }
 
+// Revoke a specific assignment (tenant + project; $4 NULL = the tenant-wide one).
 func (q *Queries) RevokeRoleFromUser(ctx context.Context, arg RevokeRoleFromUserParams) error {
-	_, err := q.db.Exec(ctx, revokeRoleFromUser, arg.UserID, arg.Name)
+	_, err := q.db.Exec(ctx, revokeRoleFromUser,
+		arg.UserID,
+		arg.Name,
+		arg.TenantID,
+		arg.ProjectID,
+	)
 	return err
 }
 

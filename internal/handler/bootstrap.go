@@ -41,7 +41,7 @@ func BootstrapAdmin(ctx context.Context, pool *pgxpool.Pool, email, plainPasswor
 	if err != nil {
 		return err
 	}
-	if err := qtx.AssignRoleToUser(ctx, db.AssignRoleToUserParams{UserID: user.ID, Name: "admin"}); err != nil {
+	if err := qtx.AssignRoleToUser(ctx, db.AssignRoleToUserParams{UserID: user.ID, Name: "admin", TenantID: defaultTenantUUID}); err != nil {
 		return err
 	}
 	// M6: the admin joins the default tenant so it can log in.

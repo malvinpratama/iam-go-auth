@@ -268,6 +268,39 @@ func (h *AuthHandler) ListMembers(ctx context.Context, _ *authv1.ListMembersRequ
 	return &authv1.ListMembersResponse{Members: out}, nil
 }
 
+// GetUserRoleAssignments lists a user's role assignments in the caller's active
+// tenant, each tagged with its project scope (empty = tenant-wide), so the admin
+// console can show and revoke them precisely.
+func (h *AuthHandler) GetUserRoleAssignments(ctx context.Context, req *authv1.GetUserRoleAssignmentsRequest) (*authv1.GetUserRoleAssignmentsResponse, error) {
+	if err := requirePerm(ctx, "role:read"); err != nil {
+		return nil, err
+	}
+	tenant, err := activeTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	uid, err := uuid.Parse(req.GetUserId())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid user id")
+	}
+	rows, err := h.q.GetUserRoleAssignments(ctx, db.GetUserRoleAssignmentsParams{UserID: uid, TenantID: tenant})
+	if err != nil {
+		return nil, status.Error(codes.Internal, "failed to load role assignments")
+	}
+	out := make([]*authv1.RoleAssignment, 0, len(rows))
+	for _, r := range rows {
+		ra := &authv1.RoleAssignment{Role: r.Role}
+		if r.ProjectID.Valid {
+			ra.ProjectId = uuid.UUID(r.ProjectID.Bytes).String()
+		}
+		if r.ProjectSlug != nil {
+			ra.ProjectSlug = *r.ProjectSlug
+		}
+		out = append(out, ra)
+	}
+	return &authv1.GetUserRoleAssignmentsResponse{Assignments: out}, nil
+}
+
 // parseOptionalUUID converts an optional UUID string to a pgtype.UUID; an empty
 // or unparseable string yields an invalid (SQL NULL) value.
 func parseOptionalUUID(s string) pgtype.UUID {

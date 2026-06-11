@@ -284,15 +284,29 @@ SELECT id, name, description
 FROM permissions
 ORDER BY name;
 
+-- M6: role assignment is scoped to the active tenant + an optional project
+-- ($4 NULL = tenant-wide, applies to every project in the tenant).
 -- name: AssignRoleToUser :exec
-INSERT INTO user_roles (user_id, role_id)
-SELECT $1, r.id FROM roles r WHERE r.name = $2
+INSERT INTO user_roles (user_id, role_id, tenant_id, project_id)
+SELECT $1, r.id, $3, $4 FROM roles r WHERE r.name = $2
 ON CONFLICT DO NOTHING;
 
+-- Revoke a specific assignment (tenant + project; $4 NULL = the tenant-wide one).
 -- name: RevokeRoleFromUser :exec
-DELETE FROM user_roles
-WHERE user_id = $1
-  AND role_id = (SELECT id FROM roles WHERE name = $2);
+DELETE FROM user_roles ur
+WHERE ur.user_id = $1
+  AND ur.role_id = (SELECT r.id FROM roles r WHERE r.name = $2)
+  AND ur.tenant_id = $3
+  AND ur.project_id IS NOT DISTINCT FROM $4;
+
+-- M6: a user's role assignments in a tenant, each with its project scope.
+-- name: GetUserRoleAssignments :many
+SELECT r.name AS role, ur.project_id, p.slug AS project_slug
+FROM user_roles ur
+JOIN roles r ON r.id = ur.role_id
+LEFT JOIN projects p ON p.id = ur.project_id
+WHERE ur.user_id = $1 AND ur.tenant_id = $2
+ORDER BY r.name, p.slug NULLS FIRST;
 
 -- name: GrantPermissionToRole :exec
 INSERT INTO role_permissions (role_id, permission_id)
