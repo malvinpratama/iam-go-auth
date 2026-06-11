@@ -91,10 +91,10 @@ github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 h1:6E+4a0GO5zZEnZ
 github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0/go.mod h1:zJYVVT2jmtg6P3p1VtQj7WsuWi/y4VnjVBn7F8KPB3I=
 github.com/magiconair/properties v1.8.10 h1:s31yESBquKXCV9a/ScB3ESkOjUYYv+X0rg8SYxI99mE=
 github.com/magiconair/properties v1.8.10/go.mod h1:Dhd985XPs7jluiymwWYZ0G4Z61jb3vdS329zhj2hYo0=
-github.com/malvinpratama/iam-go-contracts v0.9.0 h1:Spz51yP6gBznPrmbKhVX4pvwKeoae6qWkgkBesfZViY=
-github.com/malvinpratama/iam-go-contracts v0.9.0/go.mod h1:AWYPGQrCElFlL9gROJasUpMT1JcAdfpQAiM1QTPBI7k=
-github.com/malvinpratama/iam-go-libs v0.7.0 h1:0CZ1jjeJ7/Hawhw3InVIIo3UdrQ/fr6eEZBQL0V0dwo=
-github.com/malvinpratama/iam-go-libs v0.7.0/go.mod h1:IXrVs920bayKvzAy5WJZHM3WLpLOLkm6fCgF39HPu0M=
+github.com/malvinpratama/iam-go-contracts v0.10.0 h1:ZY3t1CsGm6NVdc4V3EvQ3ul//a/C7VxXLQP2r+WnK4s=
+github.com/malvinpratama/iam-go-contracts v0.10.0/go.mod h1:AWYPGQrCElFlL9gROJasUpMT1JcAdfpQAiM1QTPBI7k=
+github.com/malvinpratama/iam-go-libs v0.8.0 h1:uhg17HVG1dnkSlpK+Mh8r3/jlzcwS1xCY984fWJcYUA=
+github.com/malvinpratama/iam-go-libs v0.8.0/go.mod h1:IXrVs920bayKvzAy5WJZHM3WLpLOLkm6fCgF39HPu0M=
 github.com/mdelapenya/tlscert v0.2.0 h1:7H81W6Z/4weDvZBNOfQte5GpIMo0lGYEeWbkGp5LJHI=
 github.com/mdelapenya/tlscert v0.2.0/go.mod h1:O4njj3ELLnJjGdkN7M/vIVCpZ+Cf0L6muqOG4tLSl8o=
 github.com/moby/docker-image-spec v1.3.1 h1:jMKff3w6PgbfSa69GfNg+zN/XLhfXJGnEx3Nl2EsFP0=

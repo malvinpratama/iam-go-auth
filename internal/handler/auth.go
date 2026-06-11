@@ -188,6 +188,12 @@ func (h *AuthHandler) Login(ctx context.Context, req *authv1.LoginRequest) (*aut
 // fetches a TOTP code.
 const mfaTokenTTL = 5 * time.Minute
 
+// refreshRotationGrace is how long after a refresh token is rotated a concurrent
+// re-presentation of it is still treated as the benign parallel-refresh race
+// (re-issue) rather than token theft (family wipe). Short enough to bound replay
+// risk; long enough to absorb a client firing several requests at once.
+const refreshRotationGrace = 60 * time.Second
+
 // Refresh rotates a valid refresh token for a new token pair.
 func (h *AuthHandler) Refresh(ctx context.Context, req *authv1.RefreshRequest) (*authv1.TokenPair, error) {
 	hash := hashToken(req.GetRefreshToken())
@@ -196,8 +202,20 @@ func (h *AuthHandler) Refresh(ctx context.Context, req *authv1.RefreshRequest) (
 		return nil, status.Error(codes.Unauthenticated, "invalid refresh token")
 	}
 	if row.RevokedAt.Valid {
-		// Reuse of an already-revoked refresh token suggests theft → revoke the
-		// whole token family for this user (defensive).
+		// A token revoked by *rotation* (replaced_by set) and re-presented within
+		// the grace window is the benign concurrent-refresh race — e.g. NextAuth
+		// firing several requests at once after the access token expires, each
+		// refreshing with the same token. Re-issue instead of treating it as theft.
+		rotated := row.ReplacedBy != nil && *row.ReplacedBy != ""
+		if rotated && time.Since(row.RevokedAt.Time) < refreshRotationGrace {
+			user, err := h.q.GetUserByID(ctx, row.UserID)
+			if err != nil {
+				return nil, status.Error(codes.Unauthenticated, "user not found")
+			}
+			return h.issueTokens(ctx, user.ID, user.Email, row.TenantID, row.ProjectID)
+		}
+		// Otherwise (revoked by logout, or rotated outside the grace) genuine
+		// reuse suggests theft → revoke the whole token family (defensive).
 		_ = h.q.RevokeAllUserRefreshTokens(ctx, row.UserID)
 		h.auditAs(ctx, row.UserID.String(), "", "refresh.reuse_detected", "", "all sessions revoked")
 		return nil, status.Error(codes.Unauthenticated, "refresh token revoked")
@@ -209,12 +227,16 @@ func (h *AuthHandler) Refresh(ctx context.Context, req *authv1.RefreshRequest) (
 	if err != nil {
 		return nil, status.Error(codes.Unauthenticated, "user not found")
 	}
-	// Rotate: revoke the presented token, then issue a fresh pair bound to the
-	// same tenant/project the session was on.
-	if err := h.q.RevokeRefreshToken(ctx, hash); err != nil {
-		return nil, status.Error(codes.Internal, "failed to rotate token")
+	// Rotate: issue the fresh pair bound to the same tenant/project, then mark the
+	// presented token rotated and point it at its successor (so a concurrent
+	// re-presentation hits the grace path above, not the family wipe).
+	pair, err := h.issueTokens(ctx, user.ID, user.Email, row.TenantID, row.ProjectID)
+	if err != nil {
+		return nil, err
 	}
-	return h.issueTokens(ctx, user.ID, user.Email, row.TenantID, row.ProjectID)
+	successor := hashToken(pair.RefreshToken)
+	_ = h.q.RotateRefreshToken(ctx, db.RotateRefreshTokenParams{TokenHash: hash, ReplacedBy: &successor})
+	return pair, nil
 }
 
 // Logout revokes the refresh token and denylists the access token (by jti).

@@ -131,7 +131,7 @@ VALUES ($1, $2, $3, $4, $5)
 RETURNING id, user_id, token_hash, expires_at, created_at;
 
 -- name: GetRefreshToken :one
-SELECT id, user_id, token_hash, expires_at, revoked_at, tenant_id, project_id, created_at
+SELECT id, user_id, token_hash, expires_at, revoked_at, replaced_by, tenant_id, project_id, created_at
 FROM refresh_tokens
 WHERE token_hash = $1;
 
@@ -156,9 +156,49 @@ SELECT EXISTS (
 -- name: GetDefaultProject :one
 SELECT id FROM projects WHERE tenant_id = $1 AND slug = 'default' LIMIT 1;
 
+-- M6.4: tenant / project / member administration.
+-- name: CreateTenant :one
+INSERT INTO tenants (slug, name) VALUES ($1, $2)
+RETURNING id, slug, name, status;
+
+-- name: ListTenants :many
+SELECT id, slug, name, status FROM tenants ORDER BY name;
+
+-- name: CreateProject :one
+INSERT INTO projects (tenant_id, slug, name) VALUES ($1, $2, $3)
+RETURNING id, tenant_id, slug, name;
+
+-- name: ListProjectsByTenant :many
+SELECT id, tenant_id, slug, name FROM projects WHERE tenant_id = $1 ORDER BY name;
+
+-- name: ListMembersByTenant :many
+SELECT u.id AS user_id, u.email, m.status
+FROM memberships m
+JOIN users u ON u.id = m.user_id
+WHERE m.tenant_id = $1
+ORDER BY u.email;
+
+-- name: RemoveMember :exec
+DELETE FROM memberships WHERE user_id = $1 AND tenant_id = $2;
+
+-- AssignRoleInTenant grants a built-in role (template, tenant_id IS NULL) to a
+-- user scoped to a specific tenant — used to make a tenant's creator its admin.
+-- name: AssignRoleInTenant :exec
+INSERT INTO user_roles (user_id, role_id, tenant_id)
+SELECT $1, r.id, $3 FROM roles r WHERE r.name = $2 AND r.tenant_id IS NULL
+ON CONFLICT DO NOTHING;
+
 -- name: RevokeRefreshToken :exec
 UPDATE refresh_tokens
 SET revoked_at = now()
+WHERE token_hash = $1 AND revoked_at IS NULL;
+
+-- RotateRefreshToken marks a token as rotated (revoked) and records its
+-- successor, so a concurrent re-presentation within the grace window can be told
+-- apart from a logout-revoked token (which leaves replaced_by NULL).
+-- name: RotateRefreshToken :exec
+UPDATE refresh_tokens
+SET revoked_at = now(), replaced_by = $2
 WHERE token_hash = $1 AND revoked_at IS NULL;
 
 -- name: GetUserPermissions :many
