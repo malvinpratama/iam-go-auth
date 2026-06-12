@@ -22,6 +22,7 @@ import (
 	"github.com/malvinpratama/iam-go-auth/internal/email"
 	"github.com/malvinpratama/iam-go-auth/internal/jwt"
 	"github.com/malvinpratama/iam-go-auth/internal/password"
+	"github.com/malvinpratama/iam-go-auth/internal/totpsecret"
 	authv1 "github.com/malvinpratama/iam-go-contracts/gen/auth/v1"
 	"github.com/malvinpratama/iam-go-libs/config"
 	"github.com/malvinpratama/iam-go-libs/events"
@@ -39,15 +40,16 @@ type AuthHandler struct {
 	refreshTTL time.Duration
 	dummyHash  string // for constant-time login on unknown users
 	mail       email.Sender
-	cache      *cache.Cache // optional Redis: token denylist + permission cache
+	cache      *cache.Cache          // optional Redis: token denylist + permission cache
+	totpEnc    *totpsecret.Encryptor // encrypts TOTP shared secrets at rest (TS3)
 }
 
 // New builds an AuthHandler.
-func New(pool *pgxpool.Pool, jwtMgr *jwt.Manager, refreshTTL time.Duration, mail email.Sender, c *cache.Cache) *AuthHandler {
+func New(pool *pgxpool.Pool, jwtMgr *jwt.Manager, refreshTTL time.Duration, mail email.Sender, c *cache.Cache, totpEnc *totpsecret.Encryptor) *AuthHandler {
 	// Precompute an argon2 hash so Login spends comparable time whether or not
 	// the user exists (mitigates user-enumeration via timing).
 	dummy, _ := password.Hash("constant-time-dummy-password")
-	return &AuthHandler{pool: pool, q: db.New(pool), jwt: jwtMgr, refreshTTL: refreshTTL, dummyHash: dummy, mail: mail, cache: c}
+	return &AuthHandler{pool: pool, q: db.New(pool), jwt: jwtMgr, refreshTTL: refreshTTL, dummyHash: dummy, mail: mail, cache: c, totpEnc: totpEnc}
 }
 
 // requirePerm enforces a permission from the gateway-supplied identity metadata
