@@ -244,31 +244,48 @@ SELECT id, name, description
 FROM roles
 WHERE name = $1;
 
+-- M6: resolve a role visible in a tenant — the tenant's own role, else a
+-- built-in template (tenant_id IS NULL). Prefers the tenant-specific one.
+-- name: GetRoleInTenant :one
+SELECT id, name, description, tenant_id
+FROM roles
+WHERE name = $1 AND (tenant_id = $2 OR tenant_id IS NULL)
+ORDER BY tenant_id NULLS LAST
+LIMIT 1;
+
+-- M6: a role owned by the tenant (not a shared built-in template).
+-- name: GetTenantRole :one
+SELECT id, name, description
+FROM roles
+WHERE name = $1 AND tenant_id = $2;
+
 -- name: CreateRole :one
-INSERT INTO roles (name, description)
-VALUES ($1, $2)
+INSERT INTO roles (name, description, tenant_id)
+VALUES ($1, $2, $3)
 RETURNING id, name, description;
 
 -- name: UpdateRole :one
 UPDATE roles SET description = $2
-WHERE name = $1
+WHERE name = $1 AND tenant_id = $3
 RETURNING id, name, description;
 
 -- name: DeleteRole :exec
-DELETE FROM roles WHERE name = $1;
+DELETE FROM roles WHERE name = $1 AND tenant_id = $2;
 
 -- name: ListRoles :many
 SELECT id, name, description
 FROM roles
 ORDER BY name;
 
+-- M6: the tenant's own roles + the shared built-in templates (read-only), each
+-- with its permissions in one query (no N+1).
 -- name: ListRolesWithPermissions :many
--- Roles + their permission names in a single query (avoids the N+1 over roles).
 SELECT r.id, r.name, r.description,
        COALESCE(array_agg(p.name ORDER BY p.name) FILTER (WHERE p.name IS NOT NULL), '{}')::text[] AS permissions
 FROM roles r
 LEFT JOIN role_permissions rp ON rp.role_id = r.id
 LEFT JOIN permissions p ON p.id = rp.permission_id
+WHERE r.tenant_id = $1 OR r.tenant_id IS NULL
 GROUP BY r.id, r.name, r.description
 ORDER BY r.name;
 
@@ -285,11 +302,23 @@ FROM permissions
 ORDER BY name;
 
 -- M6: role assignment is scoped to the active tenant + an optional project
--- ($4 NULL = tenant-wide, applies to every project in the tenant).
+-- ($4 NULL = tenant-wide, applies to every project in the tenant). The role is
+-- resolved within the tenant (its own role, else a built-in template, preferring
+-- the tenant-specific one) — never another tenant's role.
 -- name: AssignRoleToUser :exec
 INSERT INTO user_roles (user_id, role_id, tenant_id, project_id)
-SELECT $1, r.id, $3, $4 FROM roles r WHERE r.name = $2
+SELECT $1, r.id, $3, $4
+FROM roles r
+WHERE r.name = $2 AND (r.tenant_id = $3 OR r.tenant_id IS NULL)
+ORDER BY r.tenant_id NULLS LAST
+LIMIT 1
 ON CONFLICT DO NOTHING;
+
+-- M6: whether a project belongs to a tenant (validate project-scoped assigns).
+-- name: IsProjectInTenant :one
+SELECT EXISTS (
+  SELECT 1 FROM projects WHERE id = $1 AND tenant_id = $2
+)::boolean;
 
 -- Revoke a specific assignment (tenant + project; $4 NULL = the tenant-wide one).
 -- name: RevokeRoleFromUser :exec
@@ -308,16 +337,18 @@ LEFT JOIN projects p ON p.id = ur.project_id
 WHERE ur.user_id = $1 AND ur.tenant_id = $2
 ORDER BY r.name, p.slug NULLS FIRST;
 
+-- M6: grant a permission to one of the TENANT's own roles (not a built-in
+-- template — those are platform-managed and shared across tenants).
 -- name: GrantPermissionToRole :exec
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id
 FROM roles r, permissions p
-WHERE r.name = $1 AND p.name = $2
+WHERE r.name = $1 AND r.tenant_id = $3 AND p.name = $2
 ON CONFLICT DO NOTHING;
 
 -- name: RevokePermissionFromRole :exec
 DELETE FROM role_permissions rp
-WHERE rp.role_id = (SELECT r.id FROM roles r WHERE r.name = $1)
+WHERE rp.role_id = (SELECT r.id FROM roles r WHERE r.name = $1 AND r.tenant_id = $3)
   AND rp.permission_id = (SELECT p.id FROM permissions p WHERE p.name = $2);
 
 -- ── Transactional outbox ────────────────────────────────────

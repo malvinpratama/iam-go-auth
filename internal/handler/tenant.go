@@ -301,6 +301,30 @@ func (h *AuthHandler) GetUserRoleAssignments(ctx context.Context, req *authv1.Ge
 	return &authv1.GetUserRoleAssignmentsResponse{Assignments: out}, nil
 }
 
+// pgTenant wraps a known tenant UUID as a (non-NULL) pgtype.UUID for queries
+// whose tenant_id column is nullable.
+func pgTenant(t uuid.UUID) pgtype.UUID { return pgtype.UUID{Bytes: t, Valid: true} }
+
+// validateAssign checks a role assignment is sound for the active tenant: the
+// role must be visible in the tenant (its own role or a built-in template), and
+// any named project must belong to the tenant — never another tenant's project.
+func (h *AuthHandler) validateAssign(ctx context.Context, roleName, projectID string, tenant uuid.UUID) error {
+	if _, err := h.q.GetRoleInTenant(ctx, db.GetRoleInTenantParams{Name: roleName, TenantID: pgTenant(tenant)}); err != nil {
+		return status.Error(codes.NotFound, "role not found in this tenant")
+	}
+	if projectID != "" {
+		pid, err := uuid.Parse(projectID)
+		if err != nil {
+			return status.Error(codes.InvalidArgument, "invalid project id")
+		}
+		ok, err := h.q.IsProjectInTenant(ctx, db.IsProjectInTenantParams{ID: pid, TenantID: tenant})
+		if err != nil || !ok {
+			return status.Error(codes.InvalidArgument, "project does not belong to this tenant")
+		}
+	}
+	return nil
+}
+
 // parseOptionalUUID converts an optional UUID string to a pgtype.UUID; an empty
 // or unparseable string yields an invalid (SQL NULL) value.
 func parseOptionalUUID(s string) pgtype.UUID {

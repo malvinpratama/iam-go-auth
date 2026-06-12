@@ -33,7 +33,11 @@ func (q *Queries) AssignRoleInTenant(ctx context.Context, arg AssignRoleInTenant
 
 const assignRoleToUser = `-- name: AssignRoleToUser :exec
 INSERT INTO user_roles (user_id, role_id, tenant_id, project_id)
-SELECT $1, r.id, $3, $4 FROM roles r WHERE r.name = $2
+SELECT $1, r.id, $3, $4
+FROM roles r
+WHERE r.name = $2 AND (r.tenant_id = $3 OR r.tenant_id IS NULL)
+ORDER BY r.tenant_id NULLS LAST
+LIMIT 1
 ON CONFLICT DO NOTHING
 `
 
@@ -45,7 +49,9 @@ type AssignRoleToUserParams struct {
 }
 
 // M6: role assignment is scoped to the active tenant + an optional project
-// ($4 NULL = tenant-wide, applies to every project in the tenant).
+// ($4 NULL = tenant-wide, applies to every project in the tenant). The role is
+// resolved within the tenant (its own role, else a built-in template, preferring
+// the tenant-specific one) — never another tenant's role.
 func (q *Queries) AssignRoleToUser(ctx context.Context, arg AssignRoleToUserParams) error {
 	_, err := q.db.Exec(ctx, assignRoleToUser,
 		arg.UserID,
@@ -247,14 +253,15 @@ func (q *Queries) CreateRefreshToken(ctx context.Context, arg CreateRefreshToken
 }
 
 const createRole = `-- name: CreateRole :one
-INSERT INTO roles (name, description)
-VALUES ($1, $2)
+INSERT INTO roles (name, description, tenant_id)
+VALUES ($1, $2, $3)
 RETURNING id, name, description
 `
 
 type CreateRoleParams struct {
 	Name        string
 	Description string
+	TenantID    pgtype.UUID
 }
 
 type CreateRoleRow struct {
@@ -264,7 +271,7 @@ type CreateRoleRow struct {
 }
 
 func (q *Queries) CreateRole(ctx context.Context, arg CreateRoleParams) (CreateRoleRow, error) {
-	row := q.db.QueryRow(ctx, createRole, arg.Name, arg.Description)
+	row := q.db.QueryRow(ctx, createRole, arg.Name, arg.Description, arg.TenantID)
 	var i CreateRoleRow
 	err := row.Scan(&i.ID, &i.Name, &i.Description)
 	return i, err
@@ -342,11 +349,16 @@ func (q *Queries) DeleteRecoveryCodes(ctx context.Context, userID uuid.UUID) err
 }
 
 const deleteRole = `-- name: DeleteRole :exec
-DELETE FROM roles WHERE name = $1
+DELETE FROM roles WHERE name = $1 AND tenant_id = $2
 `
 
-func (q *Queries) DeleteRole(ctx context.Context, name string) error {
-	_, err := q.db.Exec(ctx, deleteRole, name)
+type DeleteRoleParams struct {
+	Name     string
+	TenantID pgtype.UUID
+}
+
+func (q *Queries) DeleteRole(ctx context.Context, arg DeleteRoleParams) error {
+	_, err := q.db.Exec(ctx, deleteRole, arg.Name, arg.TenantID)
 	return err
 }
 
@@ -505,6 +517,58 @@ type GetRoleByNameRow struct {
 func (q *Queries) GetRoleByName(ctx context.Context, name string) (GetRoleByNameRow, error) {
 	row := q.db.QueryRow(ctx, getRoleByName, name)
 	var i GetRoleByNameRow
+	err := row.Scan(&i.ID, &i.Name, &i.Description)
+	return i, err
+}
+
+const getRoleInTenant = `-- name: GetRoleInTenant :one
+SELECT id, name, description, tenant_id
+FROM roles
+WHERE name = $1 AND (tenant_id = $2 OR tenant_id IS NULL)
+ORDER BY tenant_id NULLS LAST
+LIMIT 1
+`
+
+type GetRoleInTenantParams struct {
+	Name     string
+	TenantID pgtype.UUID
+}
+
+// M6: resolve a role visible in a tenant — the tenant's own role, else a
+// built-in template (tenant_id IS NULL). Prefers the tenant-specific one.
+func (q *Queries) GetRoleInTenant(ctx context.Context, arg GetRoleInTenantParams) (Role, error) {
+	row := q.db.QueryRow(ctx, getRoleInTenant, arg.Name, arg.TenantID)
+	var i Role
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Description,
+		&i.TenantID,
+	)
+	return i, err
+}
+
+const getTenantRole = `-- name: GetTenantRole :one
+SELECT id, name, description
+FROM roles
+WHERE name = $1 AND tenant_id = $2
+`
+
+type GetTenantRoleParams struct {
+	Name     string
+	TenantID pgtype.UUID
+}
+
+type GetTenantRoleRow struct {
+	ID          int64
+	Name        string
+	Description string
+}
+
+// M6: a role owned by the tenant (not a shared built-in template).
+func (q *Queries) GetTenantRole(ctx context.Context, arg GetTenantRoleParams) (GetTenantRoleRow, error) {
+	row := q.db.QueryRow(ctx, getTenantRole, arg.Name, arg.TenantID)
+	var i GetTenantRoleRow
 	err := row.Scan(&i.ID, &i.Name, &i.Description)
 	return i, err
 }
@@ -770,17 +834,20 @@ const grantPermissionToRole = `-- name: GrantPermissionToRole :exec
 INSERT INTO role_permissions (role_id, permission_id)
 SELECT r.id, p.id
 FROM roles r, permissions p
-WHERE r.name = $1 AND p.name = $2
+WHERE r.name = $1 AND r.tenant_id = $3 AND p.name = $2
 ON CONFLICT DO NOTHING
 `
 
 type GrantPermissionToRoleParams struct {
-	Name   string
-	Name_2 string
+	Name     string
+	Name_2   string
+	TenantID pgtype.UUID
 }
 
+// M6: grant a permission to one of the TENANT's own roles (not a built-in
+// template — those are platform-managed and shared across tenants).
 func (q *Queries) GrantPermissionToRole(ctx context.Context, arg GrantPermissionToRoleParams) error {
-	_, err := q.db.Exec(ctx, grantPermissionToRole, arg.Name, arg.Name_2)
+	_, err := q.db.Exec(ctx, grantPermissionToRole, arg.Name, arg.Name_2, arg.TenantID)
 	return err
 }
 
@@ -866,6 +933,25 @@ type IsActiveMemberParams struct {
 
 func (q *Queries) IsActiveMember(ctx context.Context, arg IsActiveMemberParams) (bool, error) {
 	row := q.db.QueryRow(ctx, isActiveMember, arg.UserID, arg.TenantID)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const isProjectInTenant = `-- name: IsProjectInTenant :one
+SELECT EXISTS (
+  SELECT 1 FROM projects WHERE id = $1 AND tenant_id = $2
+)::boolean
+`
+
+type IsProjectInTenantParams struct {
+	ID       uuid.UUID
+	TenantID uuid.UUID
+}
+
+// M6: whether a project belongs to a tenant (validate project-scoped assigns).
+func (q *Queries) IsProjectInTenant(ctx context.Context, arg IsProjectInTenantParams) (bool, error) {
+	row := q.db.QueryRow(ctx, isProjectInTenant, arg.ID, arg.TenantID)
 	var column_1 bool
 	err := row.Scan(&column_1)
 	return column_1, err
@@ -1183,6 +1269,7 @@ SELECT r.id, r.name, r.description,
 FROM roles r
 LEFT JOIN role_permissions rp ON rp.role_id = r.id
 LEFT JOIN permissions p ON p.id = rp.permission_id
+WHERE r.tenant_id = $1 OR r.tenant_id IS NULL
 GROUP BY r.id, r.name, r.description
 ORDER BY r.name
 `
@@ -1194,9 +1281,10 @@ type ListRolesWithPermissionsRow struct {
 	Permissions []string
 }
 
-// Roles + their permission names in a single query (avoids the N+1 over roles).
-func (q *Queries) ListRolesWithPermissions(ctx context.Context) ([]ListRolesWithPermissionsRow, error) {
-	rows, err := q.db.Query(ctx, listRolesWithPermissions)
+// M6: the tenant's own roles + the shared built-in templates (read-only), each
+// with its permissions in one query (no N+1).
+func (q *Queries) ListRolesWithPermissions(ctx context.Context, tenantID pgtype.UUID) ([]ListRolesWithPermissionsRow, error) {
+	rows, err := q.db.Query(ctx, listRolesWithPermissions, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -1362,17 +1450,18 @@ func (q *Queries) RevokeApiKey(ctx context.Context, arg RevokeApiKeyParams) erro
 
 const revokePermissionFromRole = `-- name: RevokePermissionFromRole :exec
 DELETE FROM role_permissions rp
-WHERE rp.role_id = (SELECT r.id FROM roles r WHERE r.name = $1)
+WHERE rp.role_id = (SELECT r.id FROM roles r WHERE r.name = $1 AND r.tenant_id = $3)
   AND rp.permission_id = (SELECT p.id FROM permissions p WHERE p.name = $2)
 `
 
 type RevokePermissionFromRoleParams struct {
-	Name   string
-	Name_2 string
+	Name     string
+	Name_2   string
+	TenantID pgtype.UUID
 }
 
 func (q *Queries) RevokePermissionFromRole(ctx context.Context, arg RevokePermissionFromRoleParams) error {
-	_, err := q.db.Exec(ctx, revokePermissionFromRole, arg.Name, arg.Name_2)
+	_, err := q.db.Exec(ctx, revokePermissionFromRole, arg.Name, arg.Name_2, arg.TenantID)
 	return err
 }
 
@@ -1482,13 +1571,14 @@ func (q *Queries) UpdatePassword(ctx context.Context, arg UpdatePasswordParams) 
 
 const updateRole = `-- name: UpdateRole :one
 UPDATE roles SET description = $2
-WHERE name = $1
+WHERE name = $1 AND tenant_id = $3
 RETURNING id, name, description
 `
 
 type UpdateRoleParams struct {
 	Name        string
 	Description string
+	TenantID    pgtype.UUID
 }
 
 type UpdateRoleRow struct {
@@ -1498,7 +1588,7 @@ type UpdateRoleRow struct {
 }
 
 func (q *Queries) UpdateRole(ctx context.Context, arg UpdateRoleParams) (UpdateRoleRow, error) {
-	row := q.db.QueryRow(ctx, updateRole, arg.Name, arg.Description)
+	row := q.db.QueryRow(ctx, updateRole, arg.Name, arg.Description, arg.TenantID)
 	var i UpdateRoleRow
 	err := row.Scan(&i.ID, &i.Name, &i.Description)
 	return i, err

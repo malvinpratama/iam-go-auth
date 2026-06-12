@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
@@ -96,8 +97,9 @@ func TestListRolesWithPermissions_singleQuery(t *testing.T) {
 	q := newDB(t)
 	ctx := context.Background()
 
-	// The seed migration creates the admin role with the full permission set.
-	roles, err := q.ListRolesWithPermissions(ctx)
+	// The seed migration creates the admin role (a built-in template, tenant_id
+	// NULL) with the full permission set — visible from any tenant context.
+	roles, err := q.ListRolesWithPermissions(ctx, pgtype.UUID{})
 	if err != nil {
 		t.Fatalf("list roles: %v", err)
 	}
