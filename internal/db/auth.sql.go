@@ -108,8 +108,8 @@ func (q *Queries) ConsumeRecoveryCode(ctx context.Context, arg ConsumeRecoveryCo
 
 const createApiKey = `-- name: CreateApiKey :exec
 
-INSERT INTO api_keys (id, user_id, key_hash, name, scopes, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO api_keys (id, user_id, key_hash, name, scopes, expires_at, tenant_id, project_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 `
 
 type CreateApiKeyParams struct {
@@ -119,6 +119,8 @@ type CreateApiKeyParams struct {
 	Name      string
 	Scopes    []string
 	ExpiresAt pgtype.Timestamptz
+	TenantID  uuid.UUID
+	ProjectID pgtype.UUID
 }
 
 // ── API keys (v0.9) ─────────────────────────────────────────
@@ -130,6 +132,8 @@ func (q *Queries) CreateApiKey(ctx context.Context, arg CreateApiKeyParams) erro
 		arg.Name,
 		arg.Scopes,
 		arg.ExpiresAt,
+		arg.TenantID,
+		arg.ProjectID,
 	)
 	return err
 }
@@ -430,7 +434,7 @@ func (q *Queries) FetchUnpublishedOutbox(ctx context.Context, limit int32) ([]Fe
 }
 
 const getApiKeyByHash = `-- name: GetApiKeyByHash :one
-SELECT id, user_id, scopes, expires_at, revoked_at
+SELECT id, user_id, scopes, expires_at, revoked_at, tenant_id, project_id
 FROM api_keys
 WHERE key_hash = $1
 `
@@ -441,6 +445,8 @@ type GetApiKeyByHashRow struct {
 	Scopes    []string
 	ExpiresAt pgtype.Timestamptz
 	RevokedAt pgtype.Timestamptz
+	TenantID  uuid.UUID
+	ProjectID pgtype.UUID
 }
 
 func (q *Queries) GetApiKeyByHash(ctx context.Context, keyHash string) (GetApiKeyByHashRow, error) {
@@ -452,6 +458,8 @@ func (q *Queries) GetApiKeyByHash(ctx context.Context, keyHash string) (GetApiKe
 		&i.Scopes,
 		&i.ExpiresAt,
 		&i.RevokedAt,
+		&i.TenantID,
+		&i.ProjectID,
 	)
 	return i, err
 }
@@ -865,8 +873,8 @@ func (q *Queries) IncrementLoginFailure(ctx context.Context, id uuid.UUID) (int3
 }
 
 const insertAuditEvent = `-- name: InsertAuditEvent :exec
-INSERT INTO audit_events (actor_id, actor_email, action, target, detail)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO audit_events (actor_id, actor_email, action, target, detail, tenant_id)
+VALUES ($1, $2, $3, $4, $5, $6)
 `
 
 type InsertAuditEventParams struct {
@@ -875,6 +883,7 @@ type InsertAuditEventParams struct {
 	Action     string
 	Target     string
 	Detail     string
+	TenantID   pgtype.UUID
 }
 
 func (q *Queries) InsertAuditEvent(ctx context.Context, arg InsertAuditEventParams) error {
@@ -884,6 +893,7 @@ func (q *Queries) InsertAuditEvent(ctx context.Context, arg InsertAuditEventPara
 		arg.Action,
 		arg.Target,
 		arg.Detail,
+		arg.TenantID,
 	)
 	return err
 }
@@ -922,7 +932,10 @@ func (q *Queries) InsertRecoveryCode(ctx context.Context, arg InsertRecoveryCode
 
 const isActiveMember = `-- name: IsActiveMember :one
 SELECT EXISTS (
-  SELECT 1 FROM memberships WHERE user_id = $1 AND tenant_id = $2 AND status = 'active'
+  SELECT 1 FROM memberships m
+  JOIN tenants t ON t.id = m.tenant_id
+  WHERE m.user_id = $1 AND m.tenant_id = $2
+    AND m.status = 'active' AND t.status = 'active'
 )::boolean
 `
 
@@ -931,6 +944,9 @@ type IsActiveMemberParams struct {
 	TenantID uuid.UUID
 }
 
+// IsActiveMember requires BOTH the membership and the tenant itself to be active,
+// so suspending a tenant immediately invalidates every member's access (their
+// tokens fail ValidateToken on the next request).
 func (q *Queries) IsActiveMember(ctx context.Context, arg IsActiveMemberParams) (bool, error) {
 	row := q.db.QueryRow(ctx, isActiveMember, arg.UserID, arg.TenantID)
 	var column_1 bool
@@ -1025,9 +1041,15 @@ func (q *Queries) ListApiKeysByUser(ctx context.Context, userID uuid.UUID) ([]Li
 const listAuditEvents = `-- name: ListAuditEvents :many
 SELECT id, actor_id, actor_email, action, target, detail, created_at
 FROM audit_events
+WHERE tenant_id = $1
 ORDER BY id DESC
-LIMIT $1
+LIMIT $2
 `
+
+type ListAuditEventsParams struct {
+	TenantID pgtype.UUID
+	Limit    int32
+}
 
 type ListAuditEventsRow struct {
 	ID         int64
@@ -1039,8 +1061,11 @@ type ListAuditEventsRow struct {
 	CreatedAt  pgtype.Timestamptz
 }
 
-func (q *Queries) ListAuditEvents(ctx context.Context, limit int32) ([]ListAuditEventsRow, error) {
-	rows, err := q.db.Query(ctx, listAuditEvents, limit)
+// ListAuditEvents is scoped to the caller's active tenant: an admin only ever
+// sees their own organization's audit trail. Pre-tenant events (login/register)
+// carry a NULL tenant_id and are intentionally excluded from any tenant view.
+func (q *Queries) ListAuditEvents(ctx context.Context, arg ListAuditEventsParams) ([]ListAuditEventsRow, error) {
+	rows, err := q.db.Query(ctx, listAuditEvents, arg.TenantID, arg.Limit)
 	if err != nil {
 		return nil, err
 	}

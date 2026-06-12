@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
@@ -122,8 +123,10 @@ func TestApiKey_createValidateRevoke(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
+	// tenant_id is a NOT-NULL FK to the seeded default tenant (M6 backfill).
+	defaultTenant := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 	if err := q.CreateApiKey(ctx, db.CreateApiKeyParams{
-		ID: "k1", UserID: u.ID, KeyHash: "hash1", Name: "ci", Scopes: []string{"user:read"},
+		ID: "k1", UserID: u.ID, KeyHash: "hash1", Name: "ci", Scopes: []string{"user:read"}, TenantID: defaultTenant,
 	}); err != nil {
 		t.Fatalf("create key: %v", err)
 	}
