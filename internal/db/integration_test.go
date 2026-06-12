@@ -26,6 +26,13 @@ import (
 // newDB starts a throwaway Postgres, applies the embedded migrations, and
 // returns a ready *db.Queries. The container is torn down at test end.
 func newDB(t *testing.T) *db.Queries {
+	q, _ := newDBPool(t)
+	return q
+}
+
+// newDBPool is newDB but also returns the underlying pool, for tests that need
+// to drive raw transactions (e.g. exercising RLS as the iam_rls role).
+func newDBPool(t *testing.T) (*db.Queries, *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
 	pg, err := postgres.Run(ctx, "postgres:16-alpine",
@@ -62,7 +69,7 @@ func newDB(t *testing.T) *db.Queries {
 		t.Fatalf("pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	return db.New(pool)
+	return db.New(pool), pool
 }
 
 func TestUserLifecycle_softDeleteRestore(t *testing.T) {
@@ -165,5 +172,56 @@ func TestRecoveryCode_singleUse(t *testing.T) {
 	}
 	if _, err := q.ConsumeRecoveryCode(ctx, db.ConsumeRecoveryCodeParams{UserID: u.ID, CodeHash: "rc-hash"}); err == nil {
 		t.Fatal("second consume of the same recovery code must fail (one-time)")
+	}
+}
+
+// TestRLS_withCheckRejectsCrossTenantWrite proves the M6 defense-in-depth: a
+// tenant-scoped write run inside an iam_rls transaction (SET LOCAL ROLE iam_rls +
+// app.tenant_id) is rejected by the RLS WITH CHECK policy if it targets another
+// tenant — even though the app connects as a superuser elsewhere. This is what
+// makes routing writes through withTenant (Phase 3b) meaningful.
+func TestRLS_withCheckRejectsCrossTenantWrite(t *testing.T) {
+	q, pool := newDBPool(t)
+	ctx := context.Background()
+
+	tenantA := uuid.MustParse("00000000-0000-0000-0000-000000000001") // seeded default
+	var tenantB uuid.UUID
+	if err := pool.QueryRow(ctx, "INSERT INTO tenants (slug, name) VALUES ('beta', 'Beta') RETURNING id").Scan(&tenantB); err != nil {
+		t.Fatalf("create tenant B: %v", err)
+	}
+
+	// inTenant mirrors the handler's withTenant: an iam_rls tx scoped to `tenant`.
+	inTenant := func(tenant uuid.UUID, fn func(*db.Queries) error) error {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx)
+		if _, err := tx.Exec(ctx, "SET LOCAL ROLE iam_rls"); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, "SELECT set_config('app.tenant_id', $1, true)", tenant.String()); err != nil {
+			return err
+		}
+		if err := fn(q.WithTx(tx)); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+
+	// A write for the active tenant passes WITH CHECK.
+	if err := inTenant(tenantA, func(qq *db.Queries) error {
+		_, e := qq.CreateProject(ctx, db.CreateProjectParams{TenantID: tenantA, Slug: "ok", Name: "OK"})
+		return e
+	}); err != nil {
+		t.Fatalf("same-tenant write should pass RLS WITH CHECK: %v", err)
+	}
+
+	// A write that targets another tenant while scoped to A must be rejected.
+	if err := inTenant(tenantA, func(qq *db.Queries) error {
+		_, e := qq.CreateProject(ctx, db.CreateProjectParams{TenantID: tenantB, Slug: "evil", Name: "Evil"})
+		return e
+	}); err == nil {
+		t.Fatal("cross-tenant write (tenant_id=B while app.tenant_id=A) must be rejected by RLS WITH CHECK")
 	}
 }

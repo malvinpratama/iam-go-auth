@@ -435,8 +435,14 @@ func (h *AuthHandler) CreateRole(ctx context.Context, req *authv1.CreateRoleRequ
 		return nil, status.Error(codes.FailedPrecondition, "name reserved for a built-in role")
 	}
 	// Custom roles belong to the active tenant (never a NULL-tenant template).
-	role, err := h.q.CreateRole(ctx, db.CreateRoleParams{Name: req.GetName(), Description: req.GetDescription(), TenantID: pgTenant(tenant)})
-	if err != nil {
+	// The write runs inside an iam_rls transaction so RLS WITH CHECK enforces the
+	// tenant binding at the database, not just the query's own tenant_id.
+	var role db.CreateRoleRow
+	if err := h.withTenant(ctx, tenant, func(q *db.Queries) error {
+		var e error
+		role, e = q.CreateRole(ctx, db.CreateRoleParams{Name: req.GetName(), Description: req.GetDescription(), TenantID: pgTenant(tenant)})
+		return e
+	}); err != nil {
 		return nil, status.Error(codes.AlreadyExists, "role already exists")
 	}
 	h.audit(ctx, "role.create", req.GetName(), "")
@@ -454,8 +460,12 @@ func (h *AuthHandler) UpdateRole(ctx context.Context, req *authv1.UpdateRoleRequ
 	if isBuiltinRole(req.GetName()) {
 		return nil, status.Error(codes.FailedPrecondition, "cannot modify a built-in role")
 	}
-	role, err := h.q.UpdateRole(ctx, db.UpdateRoleParams{Name: req.GetName(), Description: req.GetDescription(), TenantID: pgTenant(tenant)})
-	if err != nil {
+	var role db.UpdateRoleRow
+	if err := h.withTenant(ctx, tenant, func(q *db.Queries) error {
+		var e error
+		role, e = q.UpdateRole(ctx, db.UpdateRoleParams{Name: req.GetName(), Description: req.GetDescription(), TenantID: pgTenant(tenant)})
+		return e
+	}); err != nil {
 		return nil, status.Error(codes.NotFound, "role not found in this tenant")
 	}
 	return &authv1.Role{Id: role.ID, Name: role.Name, Description: role.Description}, nil
@@ -475,7 +485,9 @@ func (h *AuthHandler) DeleteRole(ctx context.Context, req *authv1.DeleteRoleRequ
 	if _, err := h.q.GetTenantRole(ctx, db.GetTenantRoleParams{Name: req.GetName(), TenantID: pgTenant(tenant)}); err != nil {
 		return nil, status.Error(codes.NotFound, "role not found in this tenant")
 	}
-	if err := h.q.DeleteRole(ctx, db.DeleteRoleParams{Name: req.GetName(), TenantID: pgTenant(tenant)}); err != nil {
+	if err := h.withTenant(ctx, tenant, func(q *db.Queries) error {
+		return q.DeleteRole(ctx, db.DeleteRoleParams{Name: req.GetName(), TenantID: pgTenant(tenant)})
+	}); err != nil {
 		return nil, status.Error(codes.Internal, "failed to delete role")
 	}
 	h.audit(ctx, "role.delete", req.GetName(), "")
@@ -517,7 +529,9 @@ func (h *AuthHandler) AssignRole(ctx context.Context, req *authv1.AssignRoleRequ
 	if err := h.validateAssign(ctx, req.GetRoleName(), req.GetProjectId(), tenant); err != nil {
 		return nil, err
 	}
-	if err := h.q.AssignRoleToUser(ctx, db.AssignRoleToUserParams{UserID: userID, Name: req.GetRoleName(), TenantID: tenant, ProjectID: parseOptionalUUID(req.GetProjectId())}); err != nil {
+	if err := h.withTenant(ctx, tenant, func(q *db.Queries) error {
+		return q.AssignRoleToUser(ctx, db.AssignRoleToUserParams{UserID: userID, Name: req.GetRoleName(), TenantID: tenant, ProjectID: parseOptionalUUID(req.GetProjectId())})
+	}); err != nil {
 		return nil, status.Error(codes.Internal, "failed to assign role")
 	}
 	h.cache.InvalidatePerms(ctx, req.GetUserId())
@@ -548,7 +562,9 @@ func (h *AuthHandler) AssignRoleBulk(ctx context.Context, req *authv1.AssignRole
 			failed = append(failed, uid)
 			continue
 		}
-		if err := h.q.AssignRoleToUser(ctx, db.AssignRoleToUserParams{UserID: userID, Name: req.GetRoleName(), TenantID: tenant, ProjectID: bulkProject}); err != nil {
+		if err := h.withTenant(ctx, tenant, func(q *db.Queries) error {
+			return q.AssignRoleToUser(ctx, db.AssignRoleToUserParams{UserID: userID, Name: req.GetRoleName(), TenantID: tenant, ProjectID: bulkProject})
+		}); err != nil {
 			failed = append(failed, uid)
 			continue
 		}
@@ -574,7 +590,9 @@ func (h *AuthHandler) RevokeRole(ctx context.Context, req *authv1.RevokeRoleRequ
 	if _, err := h.q.GetRoleByName(ctx, req.GetRoleName()); err != nil {
 		return nil, status.Error(codes.NotFound, "role not found")
 	}
-	if err := h.q.RevokeRoleFromUser(ctx, db.RevokeRoleFromUserParams{UserID: userID, Name: req.GetRoleName(), TenantID: tenant, ProjectID: parseOptionalUUID(req.GetProjectId())}); err != nil {
+	if err := h.withTenant(ctx, tenant, func(q *db.Queries) error {
+		return q.RevokeRoleFromUser(ctx, db.RevokeRoleFromUserParams{UserID: userID, Name: req.GetRoleName(), TenantID: tenant, ProjectID: parseOptionalUUID(req.GetProjectId())})
+	}); err != nil {
 		return nil, status.Error(codes.Internal, "failed to revoke role")
 	}
 	h.cache.InvalidatePerms(ctx, req.GetUserId())
@@ -621,7 +639,9 @@ func (h *AuthHandler) GrantPermission(ctx context.Context, req *authv1.GrantPerm
 	if err := h.permRoleGuard(ctx, req.GetRoleName(), tenant); err != nil {
 		return nil, err
 	}
-	if err := h.q.GrantPermissionToRole(ctx, db.GrantPermissionToRoleParams{Name: req.GetRoleName(), Name_2: req.GetPermissionName(), TenantID: pgTenant(tenant)}); err != nil {
+	if err := h.withTenant(ctx, tenant, func(q *db.Queries) error {
+		return q.GrantPermissionToRole(ctx, db.GrantPermissionToRoleParams{Name: req.GetRoleName(), Name_2: req.GetPermissionName(), TenantID: pgTenant(tenant)})
+	}); err != nil {
 		return nil, status.Error(codes.Internal, "failed to grant permission")
 	}
 	h.audit(ctx, "permission.grant", req.GetRoleName(), req.GetPermissionName())
@@ -639,7 +659,9 @@ func (h *AuthHandler) RevokePermission(ctx context.Context, req *authv1.RevokePe
 	if err := h.permRoleGuard(ctx, req.GetRoleName(), tenant); err != nil {
 		return nil, err
 	}
-	if err := h.q.RevokePermissionFromRole(ctx, db.RevokePermissionFromRoleParams{Name: req.GetRoleName(), Name_2: req.GetPermissionName(), TenantID: pgTenant(tenant)}); err != nil {
+	if err := h.withTenant(ctx, tenant, func(q *db.Queries) error {
+		return q.RevokePermissionFromRole(ctx, db.RevokePermissionFromRoleParams{Name: req.GetRoleName(), Name_2: req.GetPermissionName(), TenantID: pgTenant(tenant)})
+	}); err != nil {
 		return nil, status.Error(codes.Internal, "failed to revoke permission")
 	}
 	h.audit(ctx, "permission.revoke", req.GetRoleName(), req.GetPermissionName())

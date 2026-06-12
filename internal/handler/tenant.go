@@ -167,8 +167,14 @@ func (h *AuthHandler) CreateProject(ctx context.Context, req *authv1.CreateProje
 	if err != nil {
 		return nil, err
 	}
-	p, err := h.q.CreateProject(ctx, db.CreateProjectParams{TenantID: tenant, Slug: req.GetSlug(), Name: req.GetName()})
-	if err != nil {
+	// Write under RLS (iam_rls + app.tenant_id) so WITH CHECK pins the new row to
+	// the active tenant at the database.
+	var p db.CreateProjectRow
+	if err := h.withTenant(ctx, tenant, func(q *db.Queries) error {
+		var e error
+		p, e = q.CreateProject(ctx, db.CreateProjectParams{TenantID: tenant, Slug: req.GetSlug(), Name: req.GetName()})
+		return e
+	}); err != nil {
 		return nil, status.Error(codes.AlreadyExists, "project slug already taken in this tenant")
 	}
 	h.audit(ctx, "project.create", p.ID.String(), req.GetSlug())
@@ -216,7 +222,9 @@ func (h *AuthHandler) AddMember(ctx context.Context, req *authv1.AddMemberReques
 	if err != nil {
 		return nil, status.Error(codes.Internal, "user lookup failed")
 	}
-	if err := h.q.CreateMembership(ctx, db.CreateMembershipParams{UserID: user.ID, TenantID: tenant}); err != nil {
+	if err := h.withTenant(ctx, tenant, func(q *db.Queries) error {
+		return q.CreateMembership(ctx, db.CreateMembershipParams{UserID: user.ID, TenantID: tenant})
+	}); err != nil {
 		return nil, status.Error(codes.Internal, "could not add member")
 	}
 	h.audit(ctx, "member.add", user.ID.String(), tenant.String())
@@ -236,7 +244,9 @@ func (h *AuthHandler) RemoveMember(ctx context.Context, req *authv1.RemoveMember
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid user id")
 	}
-	if err := h.q.RemoveMember(ctx, db.RemoveMemberParams{UserID: uid, TenantID: tenant}); err != nil {
+	if err := h.withTenant(ctx, tenant, func(q *db.Queries) error {
+		return q.RemoveMember(ctx, db.RemoveMemberParams{UserID: uid, TenantID: tenant})
+	}); err != nil {
 		return nil, status.Error(codes.Internal, "could not remove member")
 	}
 	h.audit(ctx, "member.remove", req.GetUserId(), tenant.String())
