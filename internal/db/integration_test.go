@@ -225,3 +225,52 @@ func TestRLS_withCheckRejectsCrossTenantWrite(t *testing.T) {
 		t.Fatal("cross-tenant write (tenant_id=B while app.tenant_id=A) must be rejected by RLS WITH CHECK")
 	}
 }
+
+// TestLeastPrivRole_iamAppDoesNotBypassRLS proves the Phase 3c (T4) groundwork:
+// the prepared least-privilege role iam_app is a non-superuser, so RLS applies to
+// it by default. With no app.tenant_id set, the fail-closed policy hides every
+// tenant row — whereas the superuser connection sees them all. This is the whole
+// reason to move the runtime connection off the superuser.
+func TestLeastPrivRole_iamAppDoesNotBypassRLS(t *testing.T) {
+	_, pool := newDBPool(t)
+	ctx := context.Background()
+
+	// As the superuser test connection, the seeded default project is visible.
+	var superCount int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM projects").Scan(&superCount); err != nil {
+		t.Fatalf("superuser count: %v", err)
+	}
+	if superCount == 0 {
+		t.Fatal("expected the seeded default project to be visible to the superuser")
+	}
+
+	// iam_app exists and is NOT a superuser / does not bypass RLS.
+	var isSuper, bypassRLS bool
+	if err := pool.QueryRow(ctx, "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = 'iam_app'").Scan(&isSuper, &bypassRLS); err != nil {
+		t.Fatalf("iam_app role should exist (migration 000014): %v", err)
+	}
+	if isSuper || bypassRLS {
+		t.Fatalf("iam_app must be NOSUPERUSER + NOBYPASSRLS, got super=%v bypassrls=%v", isSuper, bypassRLS)
+	}
+
+	// Assume iam_app (the app's future connection role) with NO tenant context.
+	// RLS is fail-closed, so it sees zero tenant rows — proving it cannot bypass.
+	if _, err := pool.Exec(ctx, "GRANT iam_app TO current_user"); err != nil {
+		t.Fatalf("grant iam_app to test user: %v", err)
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "SET LOCAL ROLE iam_app"); err != nil {
+		t.Fatalf("set role iam_app: %v", err)
+	}
+	var appCount int
+	if err := tx.QueryRow(ctx, "SELECT count(*) FROM projects").Scan(&appCount); err != nil {
+		t.Fatalf("iam_app count: %v", err)
+	}
+	if appCount != 0 {
+		t.Fatalf("iam_app with no app.tenant_id must see 0 projects (RLS fail-closed), saw %d", appCount)
+	}
+}
