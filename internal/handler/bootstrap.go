@@ -50,3 +50,43 @@ func BootstrapAdmin(ctx context.Context, pool *pgxpool.Pool, email, plainPasswor
 	}
 	return tx.Commit(ctx)
 }
+
+// BootstrapDemo ensures a read-only demo account exists so anyone visiting the
+// public demo can sign in and look around without being able to change anything.
+// It is assigned the built-in "viewer" role (every *:read permission, no writes,
+// seeded by migration 000015). Idempotent; credentials come from the environment.
+func BootstrapDemo(ctx context.Context, pool *pgxpool.Pool, email, plainPassword string) error {
+	if email == "" || plainPassword == "" {
+		return nil
+	}
+	q := db.New(pool)
+	if _, err := q.GetUserByEmail(ctx, email); err == nil {
+		return nil // already exists
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+
+	hash, err := password.Hash(plainPassword)
+	if err != nil {
+		return err
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	qtx := q.WithTx(tx)
+
+	user, err := qtx.CreateUser(ctx, db.CreateUserParams{Email: email, PasswordHash: hash})
+	if err != nil {
+		return err
+	}
+	if err := qtx.AssignRoleToUser(ctx, db.AssignRoleToUserParams{UserID: user.ID, Name: "viewer", TenantID: defaultTenantUUID}); err != nil {
+		return err
+	}
+	if err := qtx.CreateMembership(ctx, db.CreateMembershipParams{UserID: user.ID, TenantID: defaultTenantUUID}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}

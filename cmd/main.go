@@ -82,6 +82,15 @@ func main() {
 		log.Error("bootstrap oidc client", "err", err)
 		os.Exit(1)
 	}
+	// Read-only demo account for the public demo (default demo@iam.local). Set
+	// DEMO_EMAIL="" to disable.
+	if err := handler.BootstrapDemo(ctx, pool,
+		config.Getenv("DEMO_EMAIL", "demo@iam.local"),
+		config.Getenv("DEMO_PASSWORD", "demo1234"),
+	); err != nil {
+		log.Error("bootstrap demo", "err", err)
+		os.Exit(1)
+	}
 
 	jwtCfg := config.LoadJWT()
 	keys, err := jwt.LoadKeys(ctx, pool)
