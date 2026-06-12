@@ -750,6 +750,36 @@ func (h *AuthHandler) ResetPassword(ctx context.Context, req *authv1.ResetPasswo
 	return &authv1.GenericResponse{Success: true}, nil
 }
 
+// ChangePassword lets an authenticated caller rotate their own password by
+// proving the current one — no email/reset-token round-trip. All refresh tokens
+// are revoked so other sessions must re-authenticate.
+func (h *AuthHandler) ChangePassword(ctx context.Context, req *authv1.ChangePasswordRequest) (*authv1.GenericResponse, error) {
+	uid, err := callerID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(req.GetNewPassword()) < 8 {
+		return nil, status.Error(codes.InvalidArgument, "password must be at least 8 characters")
+	}
+	user, err := h.q.GetUserByID(ctx, uid)
+	if err != nil {
+		return nil, status.Error(codes.Unauthenticated, "user not found")
+	}
+	if !password.Verify(user.PasswordHash, req.GetOldPassword()) {
+		return nil, status.Error(codes.Unauthenticated, "current password is incorrect")
+	}
+	hash, err := password.Hash(req.GetNewPassword())
+	if err != nil {
+		return nil, status.Error(codes.Internal, "failed to hash password")
+	}
+	if err := h.q.UpdatePassword(ctx, db.UpdatePasswordParams{ID: uid, PasswordHash: hash}); err != nil {
+		return nil, status.Error(codes.Internal, "failed to update password")
+	}
+	_ = h.q.RevokeAllUserRefreshTokens(ctx, uid) // force re-login everywhere
+	h.auditAs(ctx, uid.String(), user.Email, "password.change", "", "")
+	return &authv1.GenericResponse{Success: true}, nil
+}
+
 // ── Audit (v0.2) ────────────────────────────────────────────
 
 func (h *AuthHandler) ListAuditEvents(ctx context.Context, req *authv1.ListAuditEventsRequest) (*authv1.ListAuditEventsResponse, error) {
