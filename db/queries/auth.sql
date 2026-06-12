@@ -50,11 +50,11 @@ RETURNING id;
 -- ── API keys (v0.9) ─────────────────────────────────────────
 
 -- name: CreateApiKey :exec
-INSERT INTO api_keys (id, user_id, key_hash, name, scopes, expires_at)
-VALUES ($1, $2, $3, $4, $5, $6);
+INSERT INTO api_keys (id, user_id, key_hash, name, scopes, expires_at, tenant_id, project_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
 
 -- name: GetApiKeyByHash :one
-SELECT id, user_id, scopes, expires_at, revoked_at
+SELECT id, user_id, scopes, expires_at, revoked_at, tenant_id, project_id
 FROM api_keys
 WHERE key_hash = $1;
 
@@ -108,14 +108,18 @@ WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > now()
 RETURNING user_id;
 
 -- name: InsertAuditEvent :exec
-INSERT INTO audit_events (actor_id, actor_email, action, target, detail)
-VALUES ($1, $2, $3, $4, $5);
+INSERT INTO audit_events (actor_id, actor_email, action, target, detail, tenant_id)
+VALUES ($1, $2, $3, $4, $5, $6);
 
+-- ListAuditEvents is scoped to the caller's active tenant: an admin only ever
+-- sees their own organization's audit trail. Pre-tenant events (login/register)
+-- carry a NULL tenant_id and are intentionally excluded from any tenant view.
 -- name: ListAuditEvents :many
 SELECT id, actor_id, actor_email, action, target, detail, created_at
 FROM audit_events
+WHERE tenant_id = $1
 ORDER BY id DESC
-LIMIT $1;
+LIMIT $2;
 
 -- name: RevokeAccessJTI :exec
 INSERT INTO revoked_tokens (jti, expires_at)
@@ -148,9 +152,15 @@ JOIN tenants t ON t.id = m.tenant_id
 WHERE m.user_id = $1 AND m.status = 'active'
 ORDER BY t.name;
 
+-- IsActiveMember requires BOTH the membership and the tenant itself to be active,
+-- so suspending a tenant immediately invalidates every member's access (their
+-- tokens fail ValidateToken on the next request).
 -- name: IsActiveMember :one
 SELECT EXISTS (
-  SELECT 1 FROM memberships WHERE user_id = $1 AND tenant_id = $2 AND status = 'active'
+  SELECT 1 FROM memberships m
+  JOIN tenants t ON t.id = m.tenant_id
+  WHERE m.user_id = $1 AND m.tenant_id = $2
+    AND m.status = 'active' AND t.status = 'active'
 )::boolean;
 
 -- name: GetDefaultProject :one

@@ -194,9 +194,17 @@ func (h *AuthHandler) CreateApiKey(ctx context.Context, req *authv1.CreateApiKey
 	if ttl := req.GetTtlSeconds(); ttl > 0 {
 		expires = pgtype.Timestamptz{Time: time.Now().Add(time.Duration(ttl) * time.Second), Valid: true}
 	}
+	// Bind the key to the tenant (+ optional project) it is minted in, so its
+	// effective permissions can never exceed the owner's access in that tenant.
+	tenant, err := activeTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
+	project := parseOptionalUUID(id.ProjectID)
 	if err := h.q.CreateApiKey(ctx, db.CreateApiKeyParams{
 		ID: keyID, UserID: uid, KeyHash: hashToken(full),
 		Name: req.GetName(), Scopes: req.GetScopes(), ExpiresAt: expires,
+		TenantID: tenant, ProjectID: project,
 	}); err != nil {
 		return nil, status.Error(codes.Internal, "failed to create api key")
 	}
@@ -263,7 +271,16 @@ func (h *AuthHandler) ValidateApiKey(ctx context.Context, req *authv1.ValidateAp
 	if err != nil || user.DeletedAt.Valid {
 		return nil, status.Error(codes.Unauthenticated, "invalid api key")
 	}
-	perms, err := h.q.GetUserPermissions(ctx, row.UserID)
+	// The key only carries the permissions its owner still holds in the tenant it
+	// was minted in. If that membership (or the tenant) was deactivated, the key
+	// is dead — this prevents a key from granting cross-tenant or stale access.
+	member, merr := h.q.IsActiveMember(ctx, db.IsActiveMemberParams{UserID: row.UserID, TenantID: row.TenantID})
+	if merr != nil || !member {
+		return nil, status.Error(codes.Unauthenticated, "api key tenant membership revoked")
+	}
+	perms, err := h.q.GetUserPermissionsScoped(ctx, db.GetUserPermissionsScopedParams{
+		UserID: row.UserID, TenantID: row.TenantID, ProjectID: row.ProjectID,
+	})
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to load permissions")
 	}

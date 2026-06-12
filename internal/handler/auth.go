@@ -72,7 +72,18 @@ func (h *AuthHandler) auditAs(ctx context.Context, actorID, actorEmail, action, 
 	}
 	_ = h.q.InsertAuditEvent(ctx, db.InsertAuditEventParams{
 		ActorID: actorID, ActorEmail: actorEmail, Action: action, Target: target, Detail: detail,
+		TenantID: auditTenant(ctx),
 	})
+}
+
+// auditTenant stamps an audit row with the caller's active tenant so each
+// organization's trail is isolated. Pre-tenant events (login/register, before a
+// tenant is bound) carry a NULL tenant and never surface in a tenant view.
+func auditTenant(ctx context.Context) pgtype.UUID {
+	if t, err := activeTenant(ctx); err == nil {
+		return pgTenant(t)
+	}
+	return pgtype.UUID{}
 }
 
 // Register creates a user, assigns the default role, and returns the user id.
@@ -723,11 +734,15 @@ func (h *AuthHandler) ListAuditEvents(ctx context.Context, req *authv1.ListAudit
 	if err := requirePerm(ctx, "audit:read"); err != nil {
 		return nil, err
 	}
+	tenant, err := activeTenant(ctx)
+	if err != nil {
+		return nil, err
+	}
 	limit := req.GetLimit()
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := h.q.ListAuditEvents(ctx, limit)
+	rows, err := h.q.ListAuditEvents(ctx, db.ListAuditEventsParams{TenantID: pgTenant(tenant), Limit: limit})
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to list audit events")
 	}
