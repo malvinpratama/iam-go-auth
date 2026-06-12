@@ -15,6 +15,7 @@ import (
 	"github.com/malvinpratama/iam-go-auth/internal/db"
 	"github.com/malvinpratama/iam-go-auth/internal/totp"
 	authv1 "github.com/malvinpratama/iam-go-contracts/gen/auth/v1"
+	"github.com/malvinpratama/iam-go-libs/config"
 	"github.com/malvinpratama/iam-go-libs/events"
 	"github.com/malvinpratama/iam-go-libs/grpcutil"
 )
@@ -147,11 +148,26 @@ func (h *AuthHandler) LoginTotp(ctx context.Context, req *authv1.LoginTotpReques
 	if err != nil || user.DeletedAt.Valid || !user.TotpEnabled || user.TotpSecret == nil {
 		return nil, status.Error(codes.Unauthenticated, "invalid credentials")
 	}
+	// The MFA step is brute-forceable (6-digit TOTP / recovery codes) within the
+	// MFA token's TTL, so it gets the same lockout as the password step.
+	if user.LockedUntil.Valid && user.LockedUntil.Time.After(time.Now()) {
+		return nil, status.Error(codes.Unauthenticated, "account temporarily locked, try again later")
+	}
 	ok := totp.Validate(req.GetCode(), *user.TotpSecret)
 	if !ok && !h.consumeRecoveryCode(ctx, uid, req.GetCode()) {
+		if max := config.LoginMaxFailures(); max > 0 {
+			if n, ierr := h.q.IncrementLoginFailure(ctx, uid); ierr == nil && int(n) >= max {
+				_ = h.q.LockUser(ctx, db.LockUserParams{
+					ID:          uid,
+					LockedUntil: pgtype.Timestamptz{Time: time.Now().Add(config.LockoutDuration()), Valid: true},
+				})
+				h.auditAs(ctx, uid.String(), user.Email, "login.locked", "", "too many failed mfa attempts")
+			}
+		}
 		h.auditAs(ctx, uid.String(), user.Email, "login.mfa_failure", "", "")
 		return nil, status.Error(codes.Unauthenticated, "invalid code")
 	}
+	_ = h.q.ResetLoginState(ctx, uid) // clear the failure counter on success
 	h.auditAs(ctx, uid.String(), user.Email, "login.success", "", "2fa")
 	return h.issueForActiveTenant(ctx, uid, user.Email)
 }
