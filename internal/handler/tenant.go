@@ -88,8 +88,15 @@ func (h *AuthHandler) SwitchTenant(ctx context.Context, req *authv1.SwitchTenant
 		return nil, status.Error(codes.PermissionDenied, "not a member of that tenant")
 	}
 	if req.GetProjectId() != "" {
-		if _, perr := uuid.Parse(req.GetProjectId()); perr != nil {
+		pid, perr := uuid.Parse(req.GetProjectId())
+		if perr != nil {
 			return nil, status.Error(codes.InvalidArgument, "invalid project id")
+		}
+		// The project must belong to the tenant being switched into, else the
+		// re-issued token would carry a cross-tenant project_id claim.
+		ok, perr := h.q.IsProjectInTenant(ctx, db.IsProjectInTenantParams{ID: pid, TenantID: tid})
+		if perr != nil || !ok {
+			return nil, status.Error(codes.InvalidArgument, "project does not belong to this tenant")
 		}
 	}
 	project := parseOptionalUUID(req.GetProjectId())

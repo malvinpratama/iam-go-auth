@@ -52,6 +52,18 @@ func (h *AuthHandler) CreateAuthorizationCode(ctx context.Context, req *authv1.C
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid user id")
 	}
+	// Only mint a code for a member of the client's organization. The token
+	// exchange re-checks this, but gating at issuance means a non-member can't
+	// drive the authorize/consent flow to a usable authorization code at all.
+	var clientTenant uuid.UUID
+	if err := h.pool.QueryRow(ctx,
+		`SELECT tenant_id FROM oauth_clients WHERE client_id = $1`, req.GetClientId()).Scan(&clientTenant); err != nil {
+		return nil, status.Error(codes.NotFound, "client not found")
+	}
+	member, merr := h.q.IsActiveMember(ctx, db.IsActiveMemberParams{UserID: uid, TenantID: clientTenant})
+	if merr != nil || !member {
+		return nil, status.Error(codes.PermissionDenied, "not a member of this client's organization")
+	}
 	code := randCode()
 	sum := sha256.Sum256([]byte(code))
 	if _, err := h.pool.Exec(ctx,
