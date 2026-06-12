@@ -58,7 +58,13 @@ func (h *AuthHandler) EnrollTotp(ctx context.Context, _ *authv1.EnrollTotpReques
 	if err != nil {
 		return nil, status.Error(codes.Internal, "failed to generate recovery codes")
 	}
-	if err := h.q.SetTotpSecret(ctx, db.SetTotpSecretParams{ID: uid, TotpSecret: &secret.Base32}); err != nil {
+	// Encrypt the shared secret before it touches the DB (TS3). The plaintext is
+	// still returned to the caller below so they can add it to their authenticator.
+	stored, err := h.totpEnc.Encrypt(secret.Base32)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "failed to encrypt secret")
+	}
+	if err := h.q.SetTotpSecret(ctx, db.SetTotpSecretParams{ID: uid, TotpSecret: &stored}); err != nil {
 		return nil, status.Error(codes.Internal, "failed to store secret")
 	}
 	// Replace any previous (now stale) recovery codes.
@@ -98,7 +104,11 @@ func (h *AuthHandler) ActivateTotp(ctx context.Context, req *authv1.ActivateTotp
 	if user.TotpSecret == nil {
 		return nil, status.Error(codes.FailedPrecondition, "no pending enrollment; call EnrollTotp first")
 	}
-	if !totp.Validate(req.GetCode(), *user.TotpSecret) {
+	secret, err := h.totpEnc.Decrypt(*user.TotpSecret)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "failed to read secret")
+	}
+	if !totp.Validate(req.GetCode(), secret) {
 		return nil, status.Error(codes.Unauthenticated, "invalid code")
 	}
 	if err := h.q.EnableTotp(ctx, uid); err != nil {
@@ -121,7 +131,12 @@ func (h *AuthHandler) DisableTotp(ctx context.Context, req *authv1.DisableTotpRe
 	if !user.TotpEnabled {
 		return &authv1.GenericResponse{Success: true}, nil // already off
 	}
-	ok := user.TotpSecret != nil && totp.Validate(req.GetCode(), *user.TotpSecret)
+	ok := false
+	if user.TotpSecret != nil {
+		if secret, derr := h.totpEnc.Decrypt(*user.TotpSecret); derr == nil {
+			ok = totp.Validate(req.GetCode(), secret)
+		}
+	}
 	if !ok && !h.consumeRecoveryCode(ctx, uid, req.GetCode()) {
 		return nil, status.Error(codes.Unauthenticated, "invalid code")
 	}
@@ -153,7 +168,8 @@ func (h *AuthHandler) LoginTotp(ctx context.Context, req *authv1.LoginTotpReques
 	if user.LockedUntil.Valid && user.LockedUntil.Time.After(time.Now()) {
 		return nil, status.Error(codes.Unauthenticated, "account temporarily locked, try again later")
 	}
-	ok := totp.Validate(req.GetCode(), *user.TotpSecret)
+	secret, derr := h.totpEnc.Decrypt(*user.TotpSecret)
+	ok := derr == nil && totp.Validate(req.GetCode(), secret)
 	if !ok && !h.consumeRecoveryCode(ctx, uid, req.GetCode()) {
 		if max := config.LoginMaxFailures(); max > 0 {
 			if n, ierr := h.q.IncrementLoginFailure(ctx, uid); ierr == nil && int(n) >= max {

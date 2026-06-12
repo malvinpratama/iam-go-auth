@@ -21,6 +21,7 @@ import (
 	"github.com/malvinpratama/iam-go-auth/internal/jwt"
 	"github.com/malvinpratama/iam-go-auth/internal/outbox"
 	"github.com/malvinpratama/iam-go-auth/internal/saga"
+	"github.com/malvinpratama/iam-go-auth/internal/totpsecret"
 	authv1 "github.com/malvinpratama/iam-go-contracts/gen/auth/v1"
 	"github.com/malvinpratama/iam-go-libs/config"
 	"github.com/malvinpratama/iam-go-libs/db"
@@ -97,7 +98,20 @@ func main() {
 	} else {
 		log.Info("auth cache: disabled (postgres denylist, no permission cache)")
 	}
-	h := handler.New(pool, jwt.NewManager(keys, jwtCfg.Issuer, jwtCfg.AccessTTL), jwtCfg.RefreshTTL, email.NewLogSender(log), authCache)
+	// TS3: encrypt TOTP shared secrets at rest. Without TOTP_ENC_KEY this is a
+	// passthrough (plaintext, as before) so dev keeps working; production should
+	// set the key.
+	totpEnc, err := totpsecret.New(config.Getenv("TOTP_ENC_KEY", ""))
+	if err != nil {
+		log.Error("init totp encryptor", "err", err)
+		os.Exit(1)
+	}
+	if totpEnc.Enabled() {
+		log.Info("totp secrets: encrypted at rest (AES-256-GCM)")
+	} else {
+		log.Warn("totp secrets: plaintext at rest — set TOTP_ENC_KEY to encrypt")
+	}
+	h := handler.New(pool, jwt.NewManager(keys, jwtCfg.Issuer, jwtCfg.AccessTTL), jwtCfg.RefreshTTL, email.NewLogSender(log), authCache, totpEnc)
 
 	// Outbox relay: drain pending domain events to NATS JetStream. Optional —
 	// without NATS_URL the events are still recorded; the gateway's lazy profile
