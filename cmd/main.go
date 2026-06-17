@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -70,8 +71,26 @@ func main() {
 			log.Error("embed migrations", "err", err)
 			os.Exit(1)
 		}
-		if err := migrate.Run(ctx, dbURL, sub); err != nil {
-			log.Error("run migrations", "err", err)
+		// migrate.Run connects once with no retry of its own. A freshly-scheduled
+		// migrate-Job pod can briefly precede its NetworkPolicy programming (the
+		// kube-router ipset that permits app=auth-migrate→postgres), so the first
+		// connect fails "connection refused". Retry the connect/apply a few times —
+		// the run is idempotent (applied versions are tracked + skipped).
+		var migErr error
+		for attempt := 1; attempt <= 12; attempt++ {
+			if migErr = migrate.Run(ctx, dbURL, sub); migErr == nil {
+				break
+			}
+			log.Warn("run migrations failed; retrying", "attempt", attempt, "err", migErr)
+			select {
+			case <-ctx.Done():
+				log.Error("run migrations", "err", ctx.Err())
+				os.Exit(1)
+			case <-time.After(3 * time.Second):
+			}
+		}
+		if migErr != nil {
+			log.Error("run migrations", "err", migErr)
 			os.Exit(1)
 		}
 		log.Info("migrations applied")
