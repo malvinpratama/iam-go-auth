@@ -274,13 +274,11 @@ func (h *AuthHandler) Logout(ctx context.Context, req *authv1.LogoutRequest) (*a
 
 // ValidateToken verifies an access token and returns the caller's roles + permissions.
 func (h *AuthHandler) ValidateToken(ctx context.Context, req *authv1.ValidateTokenRequest) (*authv1.ValidateTokenResponse, error) {
-	claims, err := h.jwt.Parse(req.GetAccessToken())
+	// ParseAccess rejects non-access tokens (MFA tokens, OIDC ID tokens) so only
+	// a genuine bearer access token can authenticate a request.
+	claims, err := h.jwt.ParseAccess(req.GetAccessToken())
 	if err != nil {
 		return nil, status.Error(codes.Unauthenticated, "invalid or expired token")
-	}
-	// An MFA-purpose token only completes a 2FA login; it is not a bearer token.
-	if claims.Purpose != "" {
-		return nil, status.Error(codes.Unauthenticated, "invalid token")
 	}
 	if claims.ID != "" {
 		// Prefer the Redis denylist (shared across replicas); fall back to the

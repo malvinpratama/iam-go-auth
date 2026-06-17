@@ -12,9 +12,23 @@ import (
 	"github.com/google/uuid"
 )
 
+// tokenUseAccess marks a token as an access token (the only kind ValidateToken
+// accepts). It gives access tokens a positive type marker so an OIDC ID token —
+// which is signed by the same key and shares the issuer — can never be replayed
+// on the access-token path.
+const tokenUseAccess = "access"
+
+// clockSkewLeeway tolerates small clock differences between the signing service
+// and verifiers when checking exp/iat/nbf, so a freshly issued token isn't
+// rejected by a verifier whose clock runs slightly behind.
+const clockSkewLeeway = 60 * time.Second
+
 // Claims is the JWT payload for an access token.
 type Claims struct {
 	Email string `json:"email"`
+	// TokenUse is "access" for a normal access token (see tokenUseAccess). ID
+	// tokens omit it; checked by ParseAccess so the two can't be confused.
+	TokenUse string `json:"token_use,omitempty"`
 	// Purpose distinguishes token kinds. Empty for a normal access token;
 	// "mfa" for the short-lived token issued between the password step and the
 	// TOTP step of a 2FA login (it must NOT be accepted as an access token).
@@ -56,6 +70,7 @@ func (m *Manager) Issue(userID, email, tenantID, projectID string) (string, erro
 	now := time.Now()
 	claims := Claims{
 		Email:     email,
+		TokenUse:  tokenUseAccess,
 		TenantID:  tenantID,
 		ProjectID: projectID,
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -125,12 +140,36 @@ func (m *Manager) Parse(tokenStr string) (*Claims, error) {
 			return nil, errors.New("unknown key id")
 		}
 		return pub, nil
-	}, jwt.WithIssuer(m.issuer))
+	}, jwt.WithIssuer(m.issuer), jwt.WithLeeway(clockSkewLeeway))
 	if err != nil {
 		return nil, err
 	}
 	if !token.Valid {
 		return nil, errors.New("invalid token")
+	}
+	return claims, nil
+}
+
+// ParseAccess validates a token AND asserts it is a bearer access token — not an
+// MFA token and not an OIDC ID token. Access tokens always carry a jti and (for
+// tokens minted after this change) token_use="access"; ID tokens carry neither.
+// Without this, an ID token (same key + issuer, empty purpose, no jti) would
+// validate on the access-token path with the holder's global permissions.
+func (m *Manager) ParseAccess(tokenStr string) (*Claims, error) {
+	claims, err := m.Parse(tokenStr)
+	if err != nil {
+		return nil, err
+	}
+	if claims.Purpose != "" {
+		return nil, errors.New("not an access token")
+	}
+	// jti is mandatory on access tokens (used for revocation); ID tokens omit it.
+	if claims.ID == "" {
+		return nil, errors.New("not an access token")
+	}
+	// Reject any token explicitly typed as something else (forward-looking).
+	if claims.TokenUse != "" && claims.TokenUse != tokenUseAccess {
+		return nil, errors.New("not an access token")
 	}
 	return claims, nil
 }

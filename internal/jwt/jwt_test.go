@@ -45,10 +45,69 @@ func TestParseRejectsTampered(t *testing.T) {
 }
 
 func TestParseRejectsExpired(t *testing.T) {
-	m := newTestManager(-time.Minute)
+	// Beyond the clock-skew leeway so it's unambiguously expired.
+	m := newTestManager(-5 * time.Minute)
 	tok, _ := m.Issue("user-123", "a@b.com", "", "")
 	if _, err := m.Parse(tok); err == nil {
 		t.Error("expected error for expired token")
+	}
+}
+
+// A token expired by less than the leeway is still accepted (tolerates skew);
+// one expired beyond it is rejected.
+func TestParseClockSkewLeeway(t *testing.T) {
+	within := newTestManager(-clockSkewLeeway / 2)
+	tok, _ := within.Issue("user-123", "a@b.com", "", "")
+	if _, err := within.Parse(tok); err != nil {
+		t.Errorf("token within leeway should validate, got %v", err)
+	}
+
+	beyond := newTestManager(-2 * clockSkewLeeway)
+	tok2, _ := beyond.Issue("user-123", "a@b.com", "", "")
+	if _, err := beyond.Parse(tok2); err == nil {
+		t.Error("token expired beyond leeway should be rejected")
+	}
+}
+
+// An OIDC ID token shares the signing key and issuer with access tokens but has
+// no jti and no token_use="access"; ParseAccess must reject it so it can't be
+// replayed as a bearer token (regression for the token-confusion gap).
+func TestParseAccessRejectsIDToken(t *testing.T) {
+	m := newTestManager(time.Minute)
+	// Issue the ID token with the manager's own issuer so the issuer check passes
+	// — the ONLY thing that may reject it is the access-token type guard.
+	idTok, err := m.IssueIDToken("user-123", "a@b.com", "some-client", "nonce-1", "iam-auth")
+	if err != nil {
+		t.Fatalf("issue id token: %v", err)
+	}
+	if _, err := m.Parse(idTok); err != nil {
+		t.Fatalf("id token should still pass plain Parse (issuer matches): %v", err)
+	}
+	if _, err := m.ParseAccess(idTok); err == nil {
+		t.Error("ParseAccess must reject an ID token")
+	}
+}
+
+func TestParseAccessRejectsMFAToken(t *testing.T) {
+	m := newTestManager(time.Minute)
+	mfaTok, err := m.IssueMFA("user-123", time.Minute)
+	if err != nil {
+		t.Fatalf("issue mfa: %v", err)
+	}
+	if _, err := m.ParseAccess(mfaTok); err == nil {
+		t.Error("ParseAccess must reject an MFA token")
+	}
+}
+
+func TestParseAccessAcceptsAccessToken(t *testing.T) {
+	m := newTestManager(time.Minute)
+	tok, _ := m.Issue("user-123", "a@b.com", "tenant-1", "")
+	claims, err := m.ParseAccess(tok)
+	if err != nil {
+		t.Fatalf("ParseAccess on a real access token: %v", err)
+	}
+	if claims.TokenUse != "access" {
+		t.Errorf("token_use = %q, want access", claims.TokenUse)
 	}
 }
 
