@@ -34,6 +34,21 @@ func newDB(t *testing.T) *db.Queries {
 // to drive raw transactions (e.g. exercising RLS as the iam_rls role).
 func newDBPool(t *testing.T) (*db.Queries, *pgxpool.Pool) {
 	t.Helper()
+	dsn := startPostgres(t)
+	pool, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return db.New(pool), pool
+}
+
+// startPostgres starts a throwaway Postgres, applies the embedded migrations, and
+// returns its DSN (connecting as the container superuser). Used by newDBPool and
+// by the iam_app cutover tests, which open a second connection as the
+// least-privilege role to prove RLS applies once off the superuser path.
+func startPostgres(t *testing.T) string {
+	t.Helper()
 	ctx := context.Background()
 	pg, err := postgres.Run(ctx, "postgres:16-alpine",
 		postgres.WithDatabase("auth"),
@@ -64,12 +79,7 @@ func newDBPool(t *testing.T) (*db.Queries, *pgxpool.Pool) {
 	if err := migrate.Run(ctx, dsn, sub); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("pool: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	return db.New(pool), pool
+	return dsn
 }
 
 func TestUserLifecycle_softDeleteRestore(t *testing.T) {
