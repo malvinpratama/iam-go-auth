@@ -37,6 +37,12 @@ func BootstrapAdmin(ctx context.Context, pool *pgxpool.Pool, email, plainPasswor
 	defer tx.Rollback(ctx)
 	qtx := q.WithTx(tx)
 
+	// AssignRoleToUser writes user_roles (Kept-strict RLS, Phase 3c) — set the GUC to
+	// the default tenant so the write passes once the app connects as iam_app.
+	if _, err := tx.Exec(ctx, "SELECT set_config('app.tenant_id', $1, true)", defaultTenantUUID.String()); err != nil {
+		return err
+	}
+
 	user, err := qtx.CreateUser(ctx, db.CreateUserParams{Email: email, PasswordHash: hash})
 	if err != nil {
 		return err
@@ -77,6 +83,12 @@ func BootstrapDemo(ctx context.Context, pool *pgxpool.Pool, email, plainPassword
 	}
 	defer tx.Rollback(ctx)
 	qtx := q.WithTx(tx)
+
+	// AssignRoleToUser writes user_roles (Kept-strict RLS, Phase 3c) — set the GUC to
+	// the default tenant so the write passes once the app connects as iam_app.
+	if _, err := tx.Exec(ctx, "SELECT set_config('app.tenant_id', $1, true)", defaultTenantUUID.String()); err != nil {
+		return err
+	}
 
 	user, err := qtx.CreateUser(ctx, db.CreateUserParams{Email: email, PasswordHash: hash})
 	if err != nil {
