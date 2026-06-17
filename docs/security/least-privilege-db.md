@@ -1,6 +1,8 @@
 # Least-privilege runtime DB role + migration-as-Job (Phase 3c / T4)
 
-Status: **role groundwork shipped; runtime cutover STAGED (not yet flipped).**
+Status: **app-side complete — hot paths wrapped, RLS tables reclassified, migrate
+subcommand + cutover tests shipped. Only the operator's connection-role flip
+(`AUTH_DATABASE_URL` → `iam_app`) remains.**
 
 ## Problem
 
@@ -33,34 +35,46 @@ It is created **`NOLOGIN`**: nothing can connect as `iam_app` until the operator
 deliberately enables it at cutover. The migration is therefore safe to deploy now
 — it only prepares the role.
 
-## Why the cutover is staged (read before flipping)
+## RLS table classification (migration `000016`)
 
-The policy is **fail-closed**: when `app.tenant_id` is unset, an RLS-enabled
-table returns **zero rows** and **rejects writes** (`WITH CHECK`). RLS is enabled
-on `roles, user_roles, oauth_clients, api_keys, refresh_tokens, memberships,
-projects, audit_events, outbox`.
+The original fail-closed policy (`000013`) covered nine tables. Some are looked up
+by a **non-tenant key before the tenant is known** — a chicken-and-egg the
+fail-closed policy cannot satisfy once the superuser bypass is gone. So `000016`
+splits them:
 
-So the moment the app connects as the non-superuser `iam_app`, **every** access
-to one of those tables that does *not* run inside a tenant-scoped transaction
-will fail. Today that includes hot, pre-tenant paths:
+- **Kept fail-closed (strict tenant RLS):** `roles`, `user_roles`, `projects`.
+  Always accessed with a known tenant. This is the defense-in-depth that survives
+  a forgotten `WHERE` once we run as `iam_app`.
+- **Relaxed to permissive `USING(true)`:** `refresh_tokens`, `api_keys` (looked up
+  by an unguessable secret hash), `oauth_clients` (looked up by `client_id` to
+  *discover* its tenant), `memberships` (looked up by `user_id` across tenants at
+  login), `audit_events`, `outbox` (append-only system tables, pre-tenant /
+  cross-tenant). Their boundary is the secret hash + the app-layer `WHERE`
+  filters that already exist, **not** tenant RLS.
 
-| Path | Touches (RLS table) | Wrapped today? |
-|------|---------------------|----------------|
-| Login | `refresh_tokens` (write) | ❌ |
-| Refresh | `refresh_tokens` (read+write) | ❌ |
-| ValidateToken | `user_roles`, `memberships` (read) | ❌ |
-| Register / bootstrap | `user_roles`, `memberships` (write) | ❌ |
-| API-key validate | `api_keys`, `user_roles` (read) | ❌ |
-| Tenant-admin writes (roles/perms/assign/projects/members) | various | ✅ Phase 3b |
-| Project / member lists | `projects`, `memberships` | ✅ M6.4b |
+## App-side wrapping (shipped)
 
-**Prerequisite for cutover:** wrap the ❌ rows so each sets `app.tenant_id`
-before touching an RLS table — either via `withTenant`/`with_tenant`, or by
-setting the GUC once per request from the token's tenant claim. `refresh_tokens`
-and `api_keys` need extra thought: they are keyed by `user_id` and managed across
-tenants, so they likely need either per-row tenant context or an explicit RLS
-policy exception. Do **not** point `POSTGRES_USER`/`DATABASE_URL` at `iam_app`
-until this is done and verified, or the service will fail closed on login.
+Every pre-tenant / hot path that reads or writes a **Kept-strict** table now sets
+`app.tenant_id` with the tenant it already knows, so it keeps working once the
+connection role is the non-superuser `iam_app`:
+
+| Path | Kept-strict access | Tenant source | Wrapped |
+|------|--------------------|---------------|---------|
+| ValidateToken | GetUserRolesScoped, GetUserPermissionsScoped | token claim | ✅ `withTenantGUC` |
+| ValidateApiKey | GetUserPermissionsScoped | key's pinned tenant | ✅ `withTenantGUC` |
+| Register / BootstrapAdmin / BootstrapDemo | AssignRoleToUser | default tenant | ✅ `set_config` in tx |
+| Tenant-admin writes (roles/perms/assign/projects/members) | various | active tenant | ✅ Phase 3b `withTenant` |
+| Project / member lists | `projects` | active tenant | ✅ M6.4b `withTenant` |
+| Login / Refresh / Logout / OIDC | only relaxed tables | — | n/a (no Kept-strict access) |
+
+`withTenantGUC` sets `app.tenant_id` only — unlike `withTenant` it does **not**
+`SET LOCAL ROLE iam_rls`. While the app still connects as the superuser `app` this
+is a **no-op** (superuser bypasses RLS), so behaviour is unchanged until the
+connection-role flip; the GUC only starts enforcing once we connect as `iam_app`.
+
+Proven by `internal/db/iamapp_cutover_test.go` (integration): a second connection
+as `iam_app` sees **zero** Kept-strict rows without `app.tenant_id`, sees the
+relaxed tables fine, and a cross-tenant write is rejected by `WITH CHECK`.
 
 ## Migration-as-Job (decouple DDL from the runtime)
 
@@ -93,20 +107,32 @@ spec:
             - secretRef:    { name: app-secrets }
 ```
 
-(The auth binary needs a `migrate` subcommand that runs the embedded migrations
-and exits; the long-running Deployment then starts with auto-migrate disabled.)
+The auth binary has the **`migrate` subcommand** (`/app/auth migrate`) — it runs
+the embedded migrations and exits (skipping security validation / tracer /
+metrics). The long-running Deployment skips startup migrations when
+**`AUTO_MIGRATE=false`**; the default is `true`, so nothing changes until both the
+Job and the flag are wired in gitops at cutover.
 
 ## Cutover steps (operator, pure-GitOps)
 
-1. Complete + verify the prerequisite wrapping (table above all ✅).
-2. Add the `iam_app` password as a Secret key and enable login, run once as `app`:
+The app-side prerequisites are all shipped (wrapping ✅, reclass ✅, `migrate`
+subcommand ✅, cutover tests ✅). What remains is operator-only and reversible:
+
+1. **Deploy the wrapping first.** Bump the `iam-go-auth` image pin in
+   `k8s/go/kustomization.yaml` to the merged 3c build and let ArgoCD sync. This is
+   a no-op behaviourally (still connecting as `app`), but it must be live before
+   the flip so the GUC-setting code is running.
+2. **Enable `iam_app` login.** Generate a password, seal it into `app-secrets`
+   (e.g. key `IAM_APP_DB_PASSWORD`), and run once as `app`:
    `ALTER ROLE iam_app WITH LOGIN PASSWORD '<from-secret>';`
-3. Add `migrate-job.yaml`; disable auto-migrate on the Deployment.
-4. Flip the app's connection string to `iam_app`:
+3. **Move migrations to the Job.** Add `k8s/go/migrate-job.yaml` (PreSync hook,
+   connects as `app`) and set `AUTO_MIGRATE=false` on the `auth` Deployment env.
+4. **Flip the connection string** to `iam_app`:
    `AUTH_DATABASE_URL: postgres://iam_app:<secret>@postgres-auth:5432/auth_db?sslmode=disable`
-5. Sync + rollout-restart `auth`. Smoke: login, `/me`, a tenant-admin write, and a
-   cross-tenant read attempt (must be empty), with `iam_app` confirmed in
-   `SELECT current_user`.
+5. **Sync + rollout-restart `auth`.** Smoke: `SELECT current_user` (= `iam_app`,
+   non-superuser), login + `/me`, a tenant-admin write, and a cross-tenant read
+   attempt (must be empty). The login path proves the wrapped hot paths work under
+   the non-superuser role.
 
 ## Rollback
 
