@@ -36,33 +36,51 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := config.ValidateSecurity(); err != nil {
-		log.Error("insecure configuration", "err", err)
-		os.Exit(1)
-	}
+	// The `migrate` subcommand runs the embedded migrations as the privileged DB
+	// owner and exits — used by the PreSync Job so the long-running server need not
+	// migrate on startup. This matters for Phase 3c: once the server connects as the
+	// least-privilege iam_app it can no longer run DDL, so migrations move to the Job.
+	migrateOnly := len(os.Args) > 1 && os.Args[1] == "migrate"
 
-	// Tracing (optional) + Prometheus /metrics.
-	shutdownTracer, err := obs.InitTracer(ctx, "auth", config.OTLPEndpoint())
-	if err != nil {
-		log.Error("init tracer", "err", err)
-		os.Exit(1)
+	if !migrateOnly {
+		if err := config.ValidateSecurity(); err != nil {
+			log.Error("insecure configuration", "err", err)
+			os.Exit(1)
+		}
+
+		// Tracing (optional) + Prometheus /metrics.
+		shutdownTracer, err := obs.InitTracer(ctx, "auth", config.OTLPEndpoint())
+		if err != nil {
+			log.Error("init tracer", "err", err)
+			os.Exit(1)
+		}
+		defer func() { _ = shutdownTracer(context.Background()) }()
+		obs.ServeMetrics(config.MetricsAddr(), log)
 	}
-	defer func() { _ = shutdownTracer(context.Background()) }()
-	obs.ServeMetrics(config.MetricsAddr(), log)
 
 	dbURL := config.MustEnv("AUTH_DATABASE_URL")
 	port := config.Getenv("AUTH_GRPC_PORT", "50051")
 
-	sub, err := fs.Sub(auth.MigrationsFS, "db/migrations")
-	if err != nil {
-		log.Error("embed migrations", "err", err)
-		os.Exit(1)
+	// Run embedded migrations for the `migrate` subcommand, or on startup unless
+	// AUTO_MIGRATE=false (set at cutover, once the Job owns migrations and the
+	// server connects as iam_app, which cannot run DDL).
+	if migrateOnly || config.Getenv("AUTO_MIGRATE", "true") != "false" {
+		sub, err := fs.Sub(auth.MigrationsFS, "db/migrations")
+		if err != nil {
+			log.Error("embed migrations", "err", err)
+			os.Exit(1)
+		}
+		if err := migrate.Run(ctx, dbURL, sub); err != nil {
+			log.Error("run migrations", "err", err)
+			os.Exit(1)
+		}
+		log.Info("migrations applied")
+	} else {
+		log.Info("auto-migrate disabled (AUTO_MIGRATE=false) — migrations run by the Job")
 	}
-	if err := migrate.Run(ctx, dbURL, sub); err != nil {
-		log.Error("run migrations", "err", err)
-		os.Exit(1)
+	if migrateOnly {
+		return
 	}
-	log.Info("migrations applied")
 
 	pool, err := db.NewPool(ctx, dbURL)
 	if err != nil {
