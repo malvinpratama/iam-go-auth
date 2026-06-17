@@ -106,6 +106,13 @@ func (h *AuthHandler) Register(ctx context.Context, req *authv1.RegisterRequest)
 	defer tx.Rollback(ctx)
 	qtx := h.q.WithTx(tx)
 
+	// AssignRoleToUser writes user_roles (Kept-strict RLS, Phase 3c). Set the GUC to
+	// the default tenant so the write passes the fail-closed policy once the app
+	// connects as the non-superuser iam_app. No-op while connected as superuser.
+	if _, err := tx.Exec(ctx, "SELECT set_config('app.tenant_id', $1, true)", defaultTenantUUID.String()); err != nil {
+		return nil, status.Error(codes.Internal, "failed to set tenant context")
+	}
+
 	user, err := qtx.CreateUser(ctx, db.CreateUserParams{Email: req.GetEmail(), PasswordHash: hash})
 	if err != nil {
 		return nil, status.Error(codes.AlreadyExists, "email already registered")
@@ -328,7 +335,13 @@ func (h *AuthHandler) ValidateToken(ctx context.Context, req *authv1.ValidateTok
 			return nil, status.Error(codes.Unauthenticated, "invalid tenant")
 		}
 		proj := parseOptionalUUID(claims.ProjectID)
-		roles, err = h.q.GetUserRolesScoped(ctx, db.GetUserRolesScopedParams{UserID: userID, TenantID: tid, ProjectID: proj})
+		// roles is a Kept-strict RLS table (Phase 3c) — read with app.tenant_id set
+		// so a non-superuser iam_app connection sees this tenant's rows.
+		err = h.withTenantGUC(ctx, tid, func(q *db.Queries) error {
+			var e error
+			roles, e = q.GetUserRolesScoped(ctx, db.GetUserRolesScopedParams{UserID: userID, TenantID: tid, ProjectID: proj})
+			return e
+		})
 	} else {
 		roles, err = h.q.GetUserRoles(ctx, userID)
 	}
@@ -343,7 +356,12 @@ func (h *AuthHandler) ValidateToken(ctx context.Context, req *authv1.ValidateTok
 		if claims.TenantID != "" {
 			tid, _ := uuid.Parse(claims.TenantID)
 			proj := parseOptionalUUID(claims.ProjectID)
-			perms, err = h.q.GetUserPermissionsScoped(ctx, db.GetUserPermissionsScopedParams{UserID: userID, TenantID: tid, ProjectID: proj})
+			// Joins user_roles + roles (both Kept-strict) — read under app.tenant_id.
+			err = h.withTenantGUC(ctx, tid, func(q *db.Queries) error {
+				var e error
+				perms, e = q.GetUserPermissionsScoped(ctx, db.GetUserPermissionsScopedParams{UserID: userID, TenantID: tid, ProjectID: proj})
+				return e
+			})
 		} else {
 			perms, err = h.q.GetUserPermissions(ctx, userID)
 		}

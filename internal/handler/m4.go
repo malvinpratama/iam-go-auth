@@ -310,10 +310,17 @@ func (h *AuthHandler) ValidateApiKey(ctx context.Context, req *authv1.ValidateAp
 	if merr != nil || !member {
 		return nil, status.Error(codes.Unauthenticated, "api key tenant membership revoked")
 	}
-	perms, err := h.q.GetUserPermissionsScoped(ctx, db.GetUserPermissionsScopedParams{
-		UserID: row.UserID, TenantID: row.TenantID, ProjectID: row.ProjectID,
-	})
-	if err != nil {
+	// Joins user_roles + roles (Kept-strict RLS, Phase 3c) — read with the key's
+	// own tenant set as app.tenant_id so a non-superuser iam_app connection can see
+	// the rows. The key's tenant is trusted: it was pinned at creation.
+	var perms []string
+	if err := h.withTenantGUC(ctx, row.TenantID, func(q *db.Queries) error {
+		var e error
+		perms, e = q.GetUserPermissionsScoped(ctx, db.GetUserPermissionsScopedParams{
+			UserID: row.UserID, TenantID: row.TenantID, ProjectID: row.ProjectID,
+		})
+		return e
+	}); err != nil {
 		return nil, status.Error(codes.Internal, "failed to load permissions")
 	}
 	have := make(map[string]struct{}, len(perms))

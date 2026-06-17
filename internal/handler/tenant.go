@@ -38,6 +38,30 @@ func (h *AuthHandler) withTenant(ctx context.Context, tenant uuid.UUID, fn func(
 	return tx.Commit(ctx)
 }
 
+// withTenantGUC runs fn inside a transaction that only sets app.tenant_id, without
+// elevating to iam_rls. It exists for the pre-tenant / hot auth paths (token &
+// api-key validation, register, bootstrap) that read or write a Kept-strict RLS
+// table (roles/user_roles/projects) with a known tenant. While the app still
+// connects as the superuser `app`, setting the GUC is a no-op (superuser bypasses
+// RLS), so behaviour is unchanged; once the connection role is the non-superuser
+// iam_app (Phase 3c cutover), the GUC is what satisfies the fail-closed policy.
+// Unlike withTenant it does NOT SET LOCAL ROLE, so it stays a no-op pre-cutover
+// instead of enforcing RLS early on these hot paths.
+func (h *AuthHandler) withTenantGUC(ctx context.Context, tenant uuid.UUID, fn func(*db.Queries) error) error {
+	tx, err := h.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, "SELECT set_config('app.tenant_id', $1, true)", tenant.String()); err != nil {
+		return err
+	}
+	if err := fn(h.q.WithTx(tx)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // activeTenant returns the tenant the caller's token is bound to (forwarded by
 // the gateway as x-tenant-id). Tenant-scoped admin operations act within it.
 func activeTenant(ctx context.Context) (uuid.UUID, error) {
